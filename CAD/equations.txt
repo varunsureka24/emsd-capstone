@@ -1,1 +1,0 @@
-﻿"pulley_height"= 10mm
