@@ -37,6 +37,13 @@ try:
 
         time.sleep(0.01)
 
+# lx, ly = js.get_axis(0), js.get_axis(1)  # left stick
+# rx, ry = js.get_axis(2), js.get_axis(3)  # right stick
+# a_button = js.get_button(0)              # A button
+
+# # Example: map left stick Y to robot forward/back
+# velocity = -ly  # invert if needed
+
 except KeyboardInterrupt:
     print("\nExiting...")
 finally:
