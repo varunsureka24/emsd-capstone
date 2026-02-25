@@ -82,17 +82,6 @@ class GrblController:
             self.ser.close()
             self.ser = None
 
-
-def axis_to_step(val: float, max_step: float, deadzone: float) -> float:
-    """
-    Map joystick axis value (-1..1) to a step size in mm.
-    Returns 0 if inside deadzone.
-    """
-    if abs(val) < deadzone:
-        return 0.0
-    return max_step * val
-
-
 def main():
     # ---------- Connect to GRBL ----------
     gc = GrblController(GRBL_PORT, GRBL_BAUD)
@@ -120,8 +109,9 @@ def main():
     js.init()
     print(f"Controller connected: {js.get_name()}")
     print("Controls:")
-    print("  Left stick X/Y → X/Y jog")
-    print("  Right stick Y  → Z jog")
+    print("  D-pad         → X/Y jog")
+    print("  A button (0)  → +Z jog")
+    print("  B button (1)  → -Z jog")
     print("  (Incremental moves using $J=G91 ...)")
     print("Press Ctrl+C to quit.\n")
 
@@ -132,20 +122,28 @@ def main():
             # Process events so pygame stays happy
             pygame.event.pump()
 
-            # Typical Xbox mappings:
-            #  0 = left stick X, 1 = left stick Y
-            #  3 = right stick Y  (sometimes 4 on some systems)
-            lx = js.get_axis(0)   # left stick X
-            ly = js.get_axis(1)   # left stick Y
-            rz = js.get_axis(3)   # right stick Y
+            # ----- Read controls -----
+            # D-pad is usually hat 0 on Xbox-style controllers
+            hat_x, hat_y = js.get_hat(0)
+            # hat_x: -1 left, 0 center, +1 right
+            # hat_y: -1 down, 0 center, +1 up
+
+            # Buttons for Z (typical Xbox mapping)
+            a_pressed = js.get_button(0)  # A button
+            b_pressed = js.get_button(1)  # B button
 
             now = time.time()
             if now - last_cmd_time >= COMMAND_INTERVAL:
-                # X/Y from left stick, invert Y so up on stick = +Y
-                dx = axis_to_step(lx, MAX_STEP_MM, DEADZONE)
-                dy = axis_to_step(-ly, MAX_STEP_MM, DEADZONE)
-                # Z from right stick Y, invert so up on stick = +Z
-                dz = axis_to_step(-rz, MAX_STEP_MM, DEADZONE)
+                # X/Y from D-pad (discrete steps)
+                dx = MAX_STEP_MM * hat_x        # -1, 0, or +1 times step
+                dy = MAX_STEP_MM * hat_y        # -1, 0, or +1 times step
+
+                # Z from buttons
+                dz = 0.0
+                if a_pressed:
+                    dz = MAX_STEP_MM   # +Z (up)
+                elif b_pressed:
+                    dz = -MAX_STEP_MM  # -Z (down)
 
                 if dx != 0.0 or dy != 0.0 or dz != 0.0:
                     parts = ["$J=G91"]
