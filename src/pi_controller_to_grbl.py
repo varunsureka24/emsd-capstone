@@ -12,8 +12,8 @@ GRBL_BAUD = 115200
 
 # Joystick behavior
 DEADZONE = 0.2          # how far you need to push stick before it counts
-MAX_STEP_MM = 1.0       # max incremental move per command (in mm)
-FEED_MM_PER_MIN = 500.0 # jog feed rate
+MAX_STEP_MM = 5       # max incremental move per command (in mm)
+FEED_MM_PER_MIN = 2000 # jog feed rate
 COMMAND_INTERVAL = 0.2  # seconds between jog commands
 
 # ============================================
