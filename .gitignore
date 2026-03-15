@@ -28,3 +28,5 @@ node_modules/
 *.0001.pdf
 
 .claude/
+
+*.pyc
