@@ -10,9 +10,8 @@ import serial
 GRBL_PORT = "/dev/ttyACM0" 
 GRBL_BAUD = 115200
 
-# Joystick behavior
-DEADZONE = 0.2          # how far you need to push stick before it counts
-MAX_STEP_MM = 5       # max incremental move per command (in mm)
+# Controller behavior
+MAX_STEP_MM = 5       # incremental move per button press (in mm)
 FEED_MM_PER_MIN = 2000 # jog feed rate
 COMMAND_INTERVAL = 0.2  # seconds between jog commands
 
@@ -108,10 +107,11 @@ def main():
     js = pygame.joystick.Joystick(0)
     js.init()
     print(f"Controller connected: {js.get_name()}")
-    print("Controls:")
-    print("  D-pad         → X/Y jog")
-    print("  A button (0)  → +Z jog")
-    print("  B button (1)  → -Z jog")
+    print("Controls (Xbox):")
+    print("  D-pad left/right → ±X jog")
+    print("  D-pad up/down    → ±Y jog")
+    print("  RB (button 5)    → +Z jog")
+    print("  LB (button 4)    → -Z jog")
     print("  (Incremental moves using $J=G91 ...)")
     print("Press Ctrl+C to quit.\n")
 
@@ -123,14 +123,14 @@ def main():
             pygame.event.pump()
 
             # ----- Read controls -----
-            # D-pad is usually hat 0 on Xbox-style controllers
+            # D-pad (hat 0): X and Y axes
+            # hat_x: -1 left, 0 center, +1 right  → X
+            # hat_y: -1 down, 0 center, +1 up      → Y
             hat_x, hat_y = js.get_hat(0)
-            # hat_x: -1 left, 0 center, +1 right
-            # hat_y: -1 down, 0 center, +1 up
 
-            # Buttons for Z (typical Xbox mapping)
-            a_pressed = js.get_button(0)  # A button
-            b_pressed = js.get_button(1)  # B button
+            # Z from shoulder buttons (Xbox: LB=4, RB=5)
+            rb_pressed = js.get_button(5)  # RB → +Z
+            lb_pressed = js.get_button(4)  # LB → -Z
 
             now = time.time()
             if now - last_cmd_time >= COMMAND_INTERVAL:
@@ -138,11 +138,11 @@ def main():
                 dx = MAX_STEP_MM * hat_x        # -1, 0, or +1 times step
                 dy = MAX_STEP_MM * hat_y        # -1, 0, or +1 times step
 
-                # Z from buttons
+                # Z from shoulder buttons
                 dz = 0.0
-                if a_pressed:
+                if rb_pressed:
                     dz = MAX_STEP_MM   # +Z (up)
-                elif b_pressed:
+                elif lb_pressed:
                     dz = -MAX_STEP_MM  # -Z (down)
 
                 if dx != 0.0 or dy != 0.0 or dz != 0.0:
