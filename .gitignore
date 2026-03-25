@@ -26,3 +26,5 @@ node_modules/
 *.err
 *.lck
 *.0001.pdf
+
+*.claude/
