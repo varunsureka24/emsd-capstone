@@ -1,95 +1,165 @@
-"""
-weld_controller.py — orchestrator for the spot-welding system.
-
-Runs as a QObject with a 50 Hz QTimer (replaces the asyncio loop).
-Instantiated and owned by SpotWelderGUI in pi_gui.py.
-
-Integration points (all marked TODO):
-  - GRBL serial:  replace _init_grbl / jog / home stub calls with grbl_comm.py
-  - Xbox input:   replace _tick_manual_jog stub with xbox_input.py polling
-"""
-
 import logging
+import time
+from collections import deque
+
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from state_machine import WeldStateMachine, State, Event
 from waypoints import WaypointStore, Waypoint
+from grbl_controller import GrblController
+from camera_manager import CameraManager
+from controller_input import ControllerInput
+from force_sensor import ForceSensorReader
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-DEFAULT_SERIAL_PORT = "/dev/ttyUSB0"
-DEFAULT_BAUD        = 115200
-Z_TRAVEL_HEIGHT     = 10.0   # mm — safe retract height for X/Y rapids
-Z_WELD_HEIGHT       = 0.0    # mm — contact height (tune during bring-up)
-XY_FEED_RATE        = 3000   # mm/min for rapid positioning
-Z_FEED_RATE         = 300    # mm/min for Z moves
-JOG_STEP_XY         = 1.0   # mm per jog button press
-JOG_STEP_Z          = 0.5   # mm per Z jog button press
-JOG_FEED            = 500   # mm/min for manual jog
+try:
+    from gpiozero import LED
+except Exception:
+    LED = None
 
 
-# ---------------------------------------------------------------------------
-# Controller
-# ---------------------------------------------------------------------------
+DEFAULT_SERIAL_PORT = "/dev/ttyACM0"
+DEFAULT_BAUD = 115200
+
+FORCE_SENSOR_PORT = "/dev/ttyUSB0"
+FORCE_SENSOR_BAUD = 115200
+
+CAMERA_INDEX = 0
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+
+LASER_GPIO_PIN = 18
+WELD_RELAY_GPIO_PIN = 23
+
+Z_TRAVEL_HEIGHT = 10.0
+XY_FEED_RATE = 3000
+Z_FEED_RATE = 300
+
+JOG_STEP_XY = 1.0
+JOG_FEED = 500
+COMMAND_INTERVAL = 0.2
+
+CONTACT_THRESHOLD = 780
+HARD_CONTACT_THRESHOLD = 650
+FORCE_DEBOUNCE_COUNT = 3
+Z_TOUCH_STEP = 0.2
+Z_TOUCH_FEED = 100
+Z_MAX_DESCENT = 8.0
+Z_STEP_INTERVAL = 0.10
+
+WELD_DWELL_TIME = 1.0
+
+
 class WeldController(QObject):
-    """
-    Top-level controller.  Owns the state machine and reacts to
-    state transitions by issuing GRBL commands and emitting Qt signals.
-    """
+    state_changed = pyqtSignal(str)
+    position_updated = pyqtSignal(float, float, float)
+    waypoints_updated = pyqtSignal(list)
+    progress_updated = pyqtSignal(int, int)
+    log_message = pyqtSignal(str)
 
-    # Signals consumed by the GUI
-    state_changed     = pyqtSignal(str)                  # new State.name
-    position_updated  = pyqtSignal(float, float, float)  # x, y, z (mm)
-    waypoints_updated = pyqtSignal(list)                 # list of waypoint dicts
-    progress_updated  = pyqtSignal(int, int)             # current_index, total
-    log_message       = pyqtSignal(str)                  # text for message log
+    controller_jog_visual = pyqtSignal(bool, bool, bool, bool)
+    camera_frame_ready = pyqtSignal(object)
+    laser_state_changed = pyqtSignal(bool)
+    force_updated = pyqtSignal(int)
 
     def __init__(self, serial_port: str = DEFAULT_SERIAL_PORT, baud: int = DEFAULT_BAUD):
         super().__init__()
+
         self._serial_port = serial_port
         self._baud = baud
-        self._grbl = None   # TODO: GrblConnection from grbl_comm.py
-        self._xbox = None   # TODO: XboxController from xbox_input.py
+
+        self._grbl = None
+        self._controller_input = None
+        self._force_sensor = None
+        self._camera = None
+
+        self._laser = None
+        self._weld_relay = None
 
         self._sm = WeldStateMachine(initial_state=State.SYSTEM_INIT)
         self._sm.on_transition(self._on_transition)
 
         self._waypoints = WaypointStore()
         self._weld_queue: list[Waypoint] = []
-        self._current_wp_index: int = 0
+        self._current_wp_index = 0
 
-        # Simulated position — updated by jog() until real GRBL is wired in
-        self._sim_x: float = 0.0
-        self._sim_y: float = 0.0
+        self._sim_x = 0.0
+        self._sim_y = 0.0
+        self._sim_z = 0.0
+
+        self._last_jog_time = 0.0
+
+        self._latest_force = None
+        self._contact_counter = 0
+        self._z_start_lowering = None
+        self._last_z_step_time = 0.0
+
+        self._weld_start_time = None
+        self._z_raise_started = False
+
+        self._force_history = deque(maxlen=5)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
 
-    # ── Lifecycle ──────────────────────────────────────────────────────────
-
     def start(self) -> None:
-        """Initialize subsystems and start the 50 Hz tick timer."""
         log.info("WeldController starting...")
         try:
             self._init_grbl()
-            self._init_xbox()
+            self._init_force_sensor()
+            self._init_controller()
+            self._init_camera()
+            self._init_laser()
+            self._init_weld_relay()
+
+            self._set_laser(False)
+            self._set_weld_relay(False)
+
             self._sm.post_event(Event.INIT_COMPLETE)
             self.log_message.emit("System initialized. Waiting for user input.")
-            self.position_updated.emit(self._sim_x, self._sim_y, 0.0)
+            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+
         except Exception as exc:
             log.error("Init failed: %s", exc)
             self._sm.post_event(Event.INIT_FAILED)
             self.log_message.emit(f"Init failed: {exc}")
             return
-        self._timer.start(20)  # 50 Hz
+
+        self._timer.start(20)
 
     def stop(self) -> None:
         self._timer.stop()
 
-    # ── Public API (called by GUI) ─────────────────────────────────────────
+        try:
+            self._set_laser(False)
+            self._set_weld_relay(False)
+        except Exception:
+            pass
+
+        try:
+            if self._camera:
+                self._camera.stop()
+        except Exception:
+            pass
+
+        try:
+            if self._controller_input:
+                self._controller_input.close()
+        except Exception:
+            pass
+
+        try:
+            if self._grbl:
+                self._grbl.close()
+        except Exception:
+            pass
+
+        try:
+            if self._force_sensor:
+                self._force_sensor.close()
+        except Exception:
+            pass
 
     def post_event(self, event: Event) -> bool:
         return self._sm.post_event(event)
@@ -102,29 +172,16 @@ class WeldController(QObject):
     def waypoints(self) -> WaypointStore:
         return self._waypoints
 
-    def jog(self, dx: float = 0, dy: float = 0) -> None:
-        """Send a relative jog command to GRBL. Only valid in MANUAL_JOG state."""
-        if self._sm.state != State.MANUAL_JOG:
-            log.warning("Jog requested outside MANUAL_JOG state — ignored")
-            return
-        self._sim_x += dx
-        self._sim_y += dy
-        log.info("Simulated position: X=%.2f Y=%.2f", self._sim_x, self._sim_y)
-        self.position_updated.emit(self._sim_x, self._sim_y, 0.0)
-        # TODO: cmd = f"$J=G91 X{dx:.3f} Y{dy:.3f} F{JOG_FEED}"
-        # TODO: self._grbl.send_gcode(cmd)
-
     def home(self) -> None:
-        """Run GRBL homing cycle ($H)."""
-        log.info("Homing...")
+        if not self._grbl:
+            return
         self.log_message.emit("Homing... ($H)")
-        # TODO: self._grbl.send_gcode("$H")
+        resp = self._grbl.home()
+        self.log_message.emit(f"GRBL: {resp}")
 
     def prepare_weld_queue(self) -> None:
-        """Copy stored waypoints into the execution queue, then reset the index."""
         self._weld_queue = list(self._waypoints.get_all())
         self._current_wp_index = 0
-        log.info("Weld queue loaded: %d waypoints", len(self._weld_queue))
         self.log_message.emit(f"Weld queue loaded: {len(self._weld_queue)} waypoints.")
         self.progress_updated.emit(0, len(self._weld_queue))
 
@@ -152,26 +209,83 @@ class WeldController(QObject):
         self._waypoints.reorder(pts)
         self.waypoints_updated.emit(self._waypoints.to_json_list())
 
-    # ── Subsystem init stubs ───────────────────────────────────────────────
-
     def _init_grbl(self) -> None:
-        log.warning("GRBL stub — no real connection yet")
-        # TODO: from grbl_comm import GrblConnection
-        # TODO: self._grbl = GrblConnection(self._serial_port, self._baud)
-        # TODO: self._grbl.connect()
+        self._grbl = GrblController(self._serial_port, self._baud)
+        self._grbl.connect()
+        self.log_message.emit(f"Connected to GRBL on {self._serial_port}")
 
-    def _init_xbox(self) -> None:
-        log.warning("Xbox stub — no real connection yet")
-        # TODO: from xbox_input import XboxController
-        # TODO: self._xbox = XboxController()
+        pos = self._grbl.get_position()
+        if pos is not None:
+            self._sim_x, self._sim_y, self._sim_z = pos
 
-    # ── State-transition callback ──────────────────────────────────────────
+    def _init_force_sensor(self) -> None:
+        self._force_sensor = ForceSensorReader(FORCE_SENSOR_PORT, FORCE_SENSOR_BAUD)
+        self._force_sensor.connect()
+        self.log_message.emit(f"Connected to force sensor on {FORCE_SENSOR_PORT}")
+
+    def _init_controller(self) -> None:
+        self._controller_input = ControllerInput()
+        self._controller_input.connect()
+        self.log_message.emit(f"Controller connected: {self._controller_input.get_name()}")
+
+    def _init_camera(self) -> None:
+        self._camera = CameraManager(CAMERA_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT)
+        self._camera.start()
+        self.log_message.emit("Camera started")
+
+    def _init_laser(self) -> None:
+        if LED is None:
+            self._laser = None
+            return
+        try:
+            self._laser = LED(LASER_GPIO_PIN)
+            self._laser.off()
+        except Exception:
+            self._laser = None
+
+    def _init_weld_relay(self) -> None:
+        if LED is None:
+            self._weld_relay = None
+            return
+        try:
+            self._weld_relay = LED(WELD_RELAY_GPIO_PIN)
+            self._weld_relay.off()
+        except Exception:
+            self._weld_relay = None
+
+    def _set_laser(self, on: bool) -> None:
+        try:
+            if self._laser is None:
+                self.laser_state_changed.emit(on)
+                return
+            if on:
+                self._laser.on()
+            else:
+                self._laser.off()
+            self.laser_state_changed.emit(on)
+        except Exception:
+            self.laser_state_changed.emit(on)
+
+    def _set_weld_relay(self, on: bool) -> None:
+        try:
+            if self._weld_relay is None:
+                return
+            if on:
+                self._weld_relay.on()
+            else:
+                self._weld_relay.off()
+        except Exception:
+            pass
 
     def _on_transition(self, old: State, event: Event, new: State) -> None:
-        log.info("TRANSITION: %s --%s--> %s", old.name, event.name, new.name)
         self.state_changed.emit(new.name)
         self.log_message.emit(f"{old.name}  →  {new.name}")
         self.progress_updated.emit(self._current_wp_index, len(self._weld_queue))
+
+        self._set_laser(new == State.MANUAL_JOG)
+
+        if new != State.MANUAL_JOG:
+            self.controller_jog_visual.emit(False, False, False, False)
 
         if new == State.EMERGENCY_STOP:
             self._on_enter_estop()
@@ -186,61 +300,71 @@ class WeldController(QObject):
         elif new == State.SET_WELD_POINT:
             self._on_enter_set_weld_point()
 
-    # ── Entry actions (one-shot on state entry) ────────────────────────────
-
     def _on_enter_estop(self) -> None:
-        log.critical("E-STOP ACTIVATED — sending GRBL reset")
         self.log_message.emit("*** E-STOP ACTIVATED ***")
-        # TODO: self._grbl.send_realtime(b'\x18')  # Ctrl-X soft reset
-        # TODO: self._grbl.send_realtime(b'!')      # Feed hold
+        self._set_laser(False)
+        self._set_weld_relay(False)
+        if self._grbl:
+            self._grbl.feed_hold()
+            self._grbl.soft_reset()
 
     def _on_enter_move_to_position(self) -> None:
         if self._current_wp_index >= len(self._weld_queue):
-            log.info("All waypoints welded — sequence complete")
             self._sm.post_event(Event.SEQUENCE_COMPLETE)
             return
+
         wp = self._weld_queue[self._current_wp_index]
-        log.info("Moving to waypoint %d/%d: (%.2f, %.2f)",
-                 self._current_wp_index + 1, len(self._weld_queue), wp.x, wp.y)
         self.log_message.emit(
             f"Moving to waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}: "
             f"X={wp.x:.2f}, Y={wp.y:.2f}"
         )
-        # TODO: self._grbl.send_gcode(f"G90 G0 Z{Z_TRAVEL_HEIGHT}")
-        # TODO: self._grbl.send_gcode(f"G90 G0 X{wp.x} Y{wp.y} F{XY_FEED_RATE}")
+
+        if self._grbl:
+            self._grbl.move_to(z=Z_TRAVEL_HEIGHT, feed=Z_FEED_RATE)
+            self._grbl.move_to(x=wp.x, y=wp.y, feed=XY_FEED_RATE)
 
     def _on_enter_z_lowering(self) -> None:
-        log.info("Lowering Z to weld height %.2f mm", Z_WELD_HEIGHT)
-        # TODO: self._grbl.send_gcode(f"G90 G1 Z{Z_WELD_HEIGHT} F{Z_FEED_RATE}")
+        self._contact_counter = 0
+        self._last_z_step_time = 0.0
+
+        pos = self._grbl.get_position() if self._grbl else None
+        if pos is not None:
+            self._sim_x, self._sim_y, self._sim_z = pos
+            self._z_start_lowering = self._sim_z
+        else:
+            self._z_start_lowering = self._sim_z
+
+        self.log_message.emit("Searching for contact with force sensor...")
 
     def _on_enter_execute_weld(self) -> None:
-        log.info("Firing weld pulse via relay (M3)")
+        self._weld_start_time = time.time()
+        self._set_weld_relay(True)
         self.log_message.emit(
-            f"Welding at waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}..."
+            f"Weld relay ON at waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}"
         )
-        # TODO: self._grbl.send_gcode("M3 S1000")  # SpnEn LOW → relay triggers kWeld
-        # TODO: self._grbl.send_gcode("G4 P0.5")   # 500 ms dwell
-        # TODO: self._grbl.send_gcode("M5")         # SpnEn HIGH → relay off
 
     def _on_enter_z_raising(self) -> None:
-        log.info("Raising Z to travel height %.2f mm", Z_TRAVEL_HEIGHT)
-        # TODO: self._grbl.send_gcode(f"G90 G0 Z{Z_TRAVEL_HEIGHT}")
+        self._z_raise_started = False
+        self._set_weld_relay(False)
+        self.log_message.emit("Retracting Z to travel height...")
 
     def _on_enter_set_weld_point(self) -> None:
-        # TODO: when GRBL is connected, replace _sim_x/_sim_y with:
-        # TODO: pos = self._grbl.query_position(); x, y = pos[0], pos[1]
+        pos = self._grbl.get_position() if self._grbl else None
+        if pos is not None:
+            self._sim_x, self._sim_y, self._sim_z = pos
+
         wp = Waypoint(x=self._sim_x, y=self._sim_y)
         self._waypoints.add(wp)
-        log.info("Saved waypoint: %s (total: %d)", wp, len(self._waypoints))
         self.log_message.emit(
             f"Waypoint {len(self._waypoints)} saved: X={self._sim_x:.2f}, Y={self._sim_y:.2f}"
         )
         self._sm.post_event(Event.WELD_POINT_SAVED)
         self.waypoints_updated.emit(self._waypoints.to_json_list())
 
-    # ── Tick functions (called every 20 ms by QTimer) ──────────────────────
-
     def _tick(self) -> None:
+        self._tick_camera()
+        self._tick_force_sensor()
+
         state = self._sm.state
         if state == State.IDLE:
             self._tick_idle()
@@ -263,47 +387,143 @@ class WeldController(QObject):
         elif state == State.ERROR:
             self._tick_error()
 
+    def _tick_camera(self) -> None:
+        if not self._camera:
+            return
+        frame = self._camera.read_frame()
+        if frame is not None:
+            self.camera_frame_ready.emit(frame)
+
+    def _tick_force_sensor(self) -> None:
+        if not self._force_sensor:
+            return
+        val = self._force_sensor.read_latest()
+        if val is not None:
+            self._latest_force = val
+            self._force_history.append(val)
+            self.force_updated.emit(val)
+
     def _tick_idle(self) -> None:
         pass
 
     def _tick_manual_jog(self) -> None:
-        # TODO: read xbox axes, apply deadzone, call self.jog(dx, dy)
-        pass
+        if not self._controller_input:
+            return
+
+        data = self._controller_input.poll()
+        self.controller_jog_visual.emit(
+            data["left"], data["right"], data["up"], data["down"]
+        )
+
+        now = time.time()
+        if now - self._last_jog_time < COMMAND_INTERVAL:
+            return
+
+        dx = JOG_STEP_XY * data["hat_x"]
+        dy = JOG_STEP_XY * data["hat_y"]
+
+        if dx != 0.0 or dy != 0.0:
+            if self._grbl:
+                self._grbl.jog(dx=dx, dy=dy, feed=JOG_FEED)
+                pos = self._grbl.get_position()
+                if pos is not None:
+                    self._sim_x, self._sim_y, self._sim_z = pos
+                    self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+
+            self._last_jog_time = now
 
     def _tick_camera_targeting(self) -> None:
         pass
 
     def _tick_move_to_position(self) -> None:
-        # TODO: status = self._grbl.query_status()
-        # TODO: if status == "Idle": self._sm.post_event(Event.POSITION_REACHED)
-        pass
+        if not self._grbl:
+            return
+
+        pos = self._grbl.get_position()
+        if pos is not None:
+            self._sim_x, self._sim_y, self._sim_z = pos
+            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+
+        state = self._grbl.get_machine_state()
+        if state == "Idle":
+            self._sm.post_event(Event.POSITION_REACHED)
 
     def _tick_fine_positioning(self) -> None:
-        # No fine-positioning logic yet — advance immediately
         self._sm.post_event(Event.FINE_POS_DONE)
 
     def _tick_z_lowering(self) -> None:
-        # TODO: status = self._grbl.query_status()
-        # TODO: if status == "Idle": self._sm.post_event(Event.Z_LOWER_DONE)
-        pass
+        if not self._grbl:
+            return
+
+        pos = self._grbl.get_position()
+        if pos is not None:
+            self._sim_x, self._sim_y, self._sim_z = pos
+            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+
+        if self._latest_force is not None:
+            if self._latest_force <= HARD_CONTACT_THRESHOLD:
+                self.log_message.emit("Hard contact threshold reached")
+                self._grbl.feed_hold()
+                self._sm.post_event(Event.ERROR_OCCURRED)
+                return
+
+            if self._latest_force <= CONTACT_THRESHOLD:
+                self._contact_counter += 1
+            else:
+                self._contact_counter = 0
+
+            if self._contact_counter >= FORCE_DEBOUNCE_COUNT:
+                self.log_message.emit("Contact detected")
+                self._grbl.feed_hold()
+                self._sm.post_event(Event.Z_LOWER_DONE)
+                return
+
+        if self._z_start_lowering is not None:
+            if abs(self._sim_z - self._z_start_lowering) >= Z_MAX_DESCENT:
+                self.log_message.emit("No contact detected before Z limit")
+                self._grbl.feed_hold()
+                self._sm.post_event(Event.ERROR_OCCURRED)
+                return
+
+        now = time.time()
+        if now - self._last_z_step_time >= Z_STEP_INTERVAL:
+            self._grbl.jog(dz=-Z_TOUCH_STEP, feed=Z_TOUCH_FEED)
+            self._last_z_step_time = now
 
     def _tick_execute_weld(self) -> None:
-        # TODO: status = self._grbl.query_status()
-        # TODO: if status == "Idle": self._sm.post_event(Event.WELD_COMPLETE)
-        pass
+        if self._weld_start_time is None:
+            return
+
+        if time.time() - self._weld_start_time >= WELD_DWELL_TIME:
+            self._set_weld_relay(False)
+            self.log_message.emit("Weld relay OFF")
+            self._sm.post_event(Event.WELD_COMPLETE)
 
     def _tick_z_raising(self) -> None:
-        # TODO: status = self._grbl.query_status()
-        # TODO: if status == "Idle":
-        # TODO:     self._current_wp_index += 1
-        # TODO:     if self._current_wp_index >= len(self._weld_queue):
-        # TODO:         self._sm.post_event(Event.SEQUENCE_COMPLETE)
-        # TODO:     else:
-        # TODO:         self._sm.post_event(Event.Z_RAISE_DONE)
-        pass
+        if not self._grbl:
+            return
+
+        if not self._z_raise_started:
+            self._grbl.move_to(z=Z_TRAVEL_HEIGHT, feed=Z_FEED_RATE)
+            self._z_raise_started = True
+            return
+
+        pos = self._grbl.get_position()
+        if pos is not None:
+            self._sim_x, self._sim_y, self._sim_z = pos
+            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+
+        state = self._grbl.get_machine_state()
+        if state == "Idle":
+            self._current_wp_index += 1
+            if self._current_wp_index >= len(self._weld_queue):
+                self._sm.post_event(Event.SEQUENCE_COMPLETE)
+            else:
+                self._sm.post_event(Event.Z_RAISE_DONE)
 
     def _tick_estop(self) -> None:
         pass
 
     def _tick_error(self) -> None:
-        pass
+        self._set_weld_relay(False)
+        self._set_laser(False)
