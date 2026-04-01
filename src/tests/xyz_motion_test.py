@@ -136,17 +136,20 @@ class GrblController:
             return line.split("|")[0].strip("<>")
         except Exception:
             return None
+    def jog(self, dx=0.0, dy=0.0, dz=0.0):
+        parts = ["G91"]  # incremental mode
 
-    def jog(self, dx=0.0, dy=0.0, dz=0.0, feed=500.0):
-        parts = ["$J=G91"]
+        move = ["G0"]  # rapid move
+
         if dx != 0.0:
-            parts.append(f"X{dx:.3f}")
+            move.append(f"X{dx:.3f}")
         if dy != 0.0:
-            parts.append(f"Y{dy:.3f}")
+            move.append(f"Y{dy:.3f}")
         if dz != 0.0:
-            parts.append(f"Z{dz:.3f}")
-        parts.append(f"F{feed:.1f}")
-        return self.send_command(" ".join(parts))
+            move.append(f"Z{dz:.3f}")
+
+        command = " ".join(parts + move)
+        return self.send_command(command)
 
     def move_to(self, x=None, y=None, z=None, feed=800.0):
         parts = ["G90", "G0"]
