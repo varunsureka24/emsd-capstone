@@ -34,9 +34,9 @@ GRBL_PORT = "COM3"
 GRBL_BAUD = 115200
 
 STEP_MM_XY = 5.0
-STEP_MM_Z = 5.0
+STEP_MM_Z = 1.0
 
-FEED_XY_MM_PER_MIN = 1200.0
+FEED_XY_MM_PER_MIN = 3000.0
 FEED_Z_MM_PER_MIN = 500.0
 HOME_FEED_MM_PER_MIN = 800.0
 
@@ -136,20 +136,18 @@ class GrblController:
             return line.split("|")[0].strip("<>")
         except Exception:
             return None
-    def jog(self, dx=0.0, dy=0.0, dz=0.0):
-        parts = ["G91"]  # incremental mode
-
-        move = ["G0"]  # rapid move
-
+    def jog(self, dx=0.0, dy=0.0, dz=0.0, feed=1200.0):
+        # $J= is GRBL's dedicated jog command: respects feed rate, uses the
+        # motion planner, can be cancelled with !, and does not pollute modal state
+        cmd = "$J=G91 G21"
         if dx != 0.0:
-            move.append(f"X{dx:.3f}")
+            cmd += f" X{dx:.3f}"
         if dy != 0.0:
-            move.append(f"Y{dy:.3f}")
+            cmd += f" Y{dy:.3f}"
         if dz != 0.0:
-            move.append(f"Z{dz:.3f}")
-
-        command = " ".join(parts + move)
-        return self.send_command(command)
+            cmd += f" Z{dz:.3f}"
+        cmd += f" F{feed:.1f}"
+        return self.send_command(cmd)
 
     def move_to(self, x=None, y=None, z=None, feed=800.0):
         parts = ["G90", "G0"]
@@ -162,6 +160,13 @@ class GrblController:
         if feed is not None:
             parts.append(f"F{feed:.1f}")
         return self.send_command(" ".join(parts))
+
+    def jog_cancel(self):
+        # 0x85 is GRBL's real-time jog-cancel byte: decelerates to a stop
+        # without triggering an alarm, and flushes queued jog segments
+        if self.ser:
+            self.ser.write(b"\x85")
+            self.ser.flush()
 
     def feed_hold(self):
         if self.ser:
@@ -221,6 +226,11 @@ def main():
     last_status_time = 0.0
     last_move_time = 0.0
     MOVE_INTERVAL = 0.05
+    # Keep ~2 segments queued so timing jitter doesn't empty GRBL's buffer.
+    # Tradeoff: larger = smoother motion, more coasting after release.
+    # MOVE_INTERVAL(s) * feed(mm/min) / 60 * lookahead_factor
+    STEP_MM_XY_CONT = MOVE_INTERVAL * FEED_XY_MM_PER_MIN / 60.0 * 2  # ~2.0 mm
+    prev_hat = (0, 0)
 
     # Button mapping (typical Xbox)
     LB_BTN = 4
@@ -256,7 +266,12 @@ def main():
 
             # ---------- HOME ----------
             if lt_active and not prev_lt_active:
-                pos = gc.get_position()
+                pos = None
+                for _ in range(3):
+                    pos = gc.get_position()
+                    if pos is not None:
+                        break
+                    time.sleep(0.1)
                 if pos is not None:
                     home_xyz = pos
                     print(f"[HOME SET] X={home_xyz[0]:.3f} Y={home_xyz[1]:.3f} Z={home_xyz[2]:.3f}")
@@ -287,28 +302,32 @@ def main():
             dy = 0.0
 
             if hat_x == -1:
-                dx = -STEP_MM_XY
+                dx = -STEP_MM_XY_CONT
             elif hat_x == 1:
-                dx = STEP_MM_XY
+                dx = STEP_MM_XY_CONT
 
             if hat_y == 1:
-                dy = STEP_MM_XY
+                dy = STEP_MM_XY_CONT
             elif hat_y == -1:
-                dy = -STEP_MM_XY
+                dy = -STEP_MM_XY_CONT
 
             now = time.time()
             if (dx != 0.0 or dy != 0.0) and (now - last_move_time >= MOVE_INTERVAL):
-                resp = gc.jog(dx=dx, dy=dy, dz=0.0)
+                resp = gc.jog(dx=dx, dy=dy, dz=0.0, feed=FEED_XY_MM_PER_MIN)
                 print(f"[JOG] dx={dx:.1f} dy={dy:.1f} ->", resp)
                 last_move_time = now
+            elif (hat_x, hat_y) == (0, 0) and prev_hat != (0, 0):
+                gc.jog_cancel()
+
+            prev_hat = (hat_x, hat_y)
 
             # ---------- Z fixed-step motion ----------
             if lb_pressed and not prev_lb:
-                resp = gc.jog(dx=0.0, dy=0.0, dz=+STEP_MM_Z)
+                resp = gc.jog(dx=0.0, dy=0.0, dz=+STEP_MM_Z, feed=FEED_Z_MM_PER_MIN)
                 print("[STEP] +Z 5 mm ->", resp)
 
             if rb_pressed and not prev_rb:
-                resp = gc.jog(dx=0.0, dy=0.0, dz=-STEP_MM_Z)
+                resp = gc.jog(dx=0.0, dy=0.0, dz=-STEP_MM_Z, feed=FEED_Z_MM_PER_MIN)
                 print("[STEP] -Z 5 mm ->", resp)
 
             prev_lb = lb_pressed
