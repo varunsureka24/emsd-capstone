@@ -30,7 +30,7 @@ import serial
 
 
 # ---------- USER CONFIG ----------
-GRBL_PORT = "/dev/ttyACM0"
+GRBL_PORT = "COM3"
 GRBL_BAUD = 115200
 
 STEP_MM_XY = 5.0
