@@ -291,27 +291,27 @@ def main():
 
             # ---------- XY/Z fixed-step motion ----------
             if x_pressed and not prev_x:
-                resp = gc.jog(dx=-STEP_MM_XY, dy=0.0, dz=0.0, feed=FEED_XY_MM_PER_MIN)
+                resp = gc.jog(dx=-STEP_MM_XY, dy=0.0, dz=0.0)
                 print("[STEP] -X 5 mm ->", resp)
 
             if b_pressed and not prev_b:
-                resp = gc.jog(dx=+STEP_MM_XY, dy=0.0, dz=0.0, feed=FEED_XY_MM_PER_MIN)
+                resp = gc.jog(dx=+STEP_MM_XY, dy=0.0, dz=0.0)
                 print("[STEP] +X 5 mm ->", resp)
 
             if y_pressed and not prev_y:
-                resp = gc.jog(dx=0.0, dy=+STEP_MM_XY, dz=0.0, feed=FEED_XY_MM_PER_MIN)
+                resp = gc.jog(dx=0.0, dy=+STEP_MM_XY, dz=0.0)
                 print("[STEP] +Y 5 mm ->", resp)
 
             if a_pressed and not prev_a:
-                resp = gc.jog(dx=0.0, dy=-STEP_MM_XY, dz=0.0, feed=FEED_XY_MM_PER_MIN)
+                resp = gc.jog(dx=0.0, dy=-STEP_MM_XY, dz=0.0)
                 print("[STEP] -Y 5 mm ->", resp)
 
             if lb_pressed and not prev_lb:
-                resp = gc.jog(dx=0.0, dy=0.0, dz=+STEP_MM_Z, feed=FEED_Z_MM_PER_MIN)
+                resp = gc.jog(dx=0.0, dy=0.0, dz=+STEP_MM_Z)
                 print("[STEP] +Z 5 mm ->", resp)
 
             if rb_pressed and not prev_rb:
-                resp = gc.jog(dx=0.0, dy=0.0, dz=-STEP_MM_Z, feed=FEED_Z_MM_PER_MIN)
+                resp = gc.jog(dx=0.0, dy=0.0, dz=-STEP_MM_Z)
                 print("[STEP] -Z 5 mm ->", resp)
 
             prev_a = a_pressed
