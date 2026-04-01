@@ -203,13 +203,13 @@ def main():
     js = pygame.joystick.Joystick(0)
     js.init()
 
+    has_hat = js.get_numhats() > 0
+
     print(f"Connected controller: {js.get_name()}")
     print()
-    print("Button control mapping:")
-    print("  X  -> -X by 5 mm")
-    print("  B  -> +X by 5 mm")
-    print("  Y  -> +Y by 5 mm")
-    print("  A  -> -Y by 5 mm")
+    print("Control mapping:")
+    print("  D-pad Left/Right -> X motion")
+    print("  D-pad Up/Down    -> Y motion")
     print("  LB -> +Z by 5 mm")
     print("  RB -> -Z by 5 mm")
     print("  LT -> Save current XYZ as HOME")
@@ -219,19 +219,13 @@ def main():
 
     home_xyz = None
     last_status_time = 0.0
+    last_move_time = 0.0
+    MOVE_INTERVAL = 0.05
 
     # Button mapping (typical Xbox)
-    A_BTN = 0
-    B_BTN = 1
-    X_BTN = 2
-    Y_BTN = 3
     LB_BTN = 4
     RB_BTN = 5
 
-    prev_a = False
-    prev_b = False
-    prev_x = False
-    prev_y = False
     prev_lb = False
     prev_rb = False
     prev_lt_active = False
@@ -239,16 +233,13 @@ def main():
 
     axes_count = js.get_numaxes()
     print(f"Detected {axes_count} axes")
+    print(f"Detected {js.get_numhats()} hat(s)")
     print()
 
     try:
         while True:
             pygame.event.pump()
 
-            a_pressed = bool(js.get_button(A_BTN))
-            b_pressed = bool(js.get_button(B_BTN))
-            x_pressed = bool(js.get_button(X_BTN))
-            y_pressed = bool(js.get_button(Y_BTN))
             lb_pressed = bool(js.get_button(LB_BTN))
             rb_pressed = bool(js.get_button(RB_BTN))
 
@@ -260,6 +251,8 @@ def main():
 
             lt_active = lt >= TRIGGER_THRESHOLD
             rt_active = rt >= TRIGGER_THRESHOLD
+
+            hat_x, hat_y = js.get_hat(0) if has_hat else (0, 0)
 
             # ---------- HOME ----------
             if lt_active and not prev_lt_active:
@@ -289,40 +282,39 @@ def main():
             prev_lt_active = lt_active
             prev_rt_active = rt_active
 
-            # ---------- XY/Z fixed-step motion ----------
-            if x_pressed and not prev_x:
-                resp = gc.jog(dx=-STEP_MM_XY, dy=0.0, dz=0.0, feed=FEED_XY_MM_PER_MIN)
-                print("[STEP] -X 5 mm ->", resp)
+            # ---------- D-PAD CONTINUOUS XY ----------
+            dx = 0.0
+            dy = 0.0
 
-            if b_pressed and not prev_b:
-                resp = gc.jog(dx=+STEP_MM_XY, dy=0.0, dz=0.0, feed=FEED_XY_MM_PER_MIN)
-                print("[STEP] +X 5 mm ->", resp)
+            if hat_x == -1:
+                dx = -STEP_MM_XY
+            elif hat_x == 1:
+                dx = STEP_MM_XY
 
-            if y_pressed and not prev_y:
-                resp = gc.jog(dx=0.0, dy=+STEP_MM_XY, dz=0.0, feed=FEED_XY_MM_PER_MIN)
-                print("[STEP] +Y 5 mm ->", resp)
+            if hat_y == 1:
+                dy = STEP_MM_XY
+            elif hat_y == -1:
+                dy = -STEP_MM_XY
 
-            if a_pressed and not prev_a:
-                resp = gc.jog(dx=0.0, dy=-STEP_MM_XY, dz=0.0, feed=FEED_XY_MM_PER_MIN)
-                print("[STEP] -Y 5 mm ->", resp)
+            now = time.time()
+            if (dx != 0.0 or dy != 0.0) and (now - last_move_time >= MOVE_INTERVAL):
+                resp = gc.jog(dx=dx, dy=dy, dz=0.0)
+                print(f"[JOG] dx={dx:.1f} dy={dy:.1f} ->", resp)
+                last_move_time = now
 
+            # ---------- Z fixed-step motion ----------
             if lb_pressed and not prev_lb:
-                resp = gc.jog(dx=0.0, dy=0.0, dz=+STEP_MM_Z, feed=FEED_Z_MM_PER_MIN)
+                resp = gc.jog(dx=0.0, dy=0.0, dz=+STEP_MM_Z)
                 print("[STEP] +Z 5 mm ->", resp)
 
             if rb_pressed and not prev_rb:
-                resp = gc.jog(dx=0.0, dy=0.0, dz=-STEP_MM_Z, feed=FEED_Z_MM_PER_MIN)
+                resp = gc.jog(dx=0.0, dy=0.0, dz=-STEP_MM_Z)
                 print("[STEP] -Z 5 mm ->", resp)
 
-            prev_a = a_pressed
-            prev_b = b_pressed
-            prev_x = x_pressed
-            prev_y = y_pressed
             prev_lb = lb_pressed
             prev_rb = rb_pressed
 
             # ---------- Status ----------
-            now = time.time()
             if now - last_status_time >= STATUS_INTERVAL:
                 pos = gc.get_position()
                 state = gc.get_machine_state()
@@ -355,7 +347,6 @@ def main():
             pygame.quit()
         except Exception:
             pass
-
 
 if __name__ == "__main__":
     main()
