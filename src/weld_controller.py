@@ -66,11 +66,21 @@ class WeldController(QObject):
     laser_state_changed = pyqtSignal(bool)
     force_updated = pyqtSignal(int)
 
-    def __init__(self, serial_port: str = DEFAULT_SERIAL_PORT, baud: int = DEFAULT_BAUD):
+    def __init__(self, serial_port: str = DEFAULT_SERIAL_PORT, baud: int = DEFAULT_BAUD,
+                 enable_grbl: bool = True, enable_force_sensor: bool = True,
+                 enable_controller: bool = True, enable_camera: bool = True,
+                 enable_laser: bool = True, enable_weld_relay: bool = True):
         super().__init__()
 
         self._serial_port = serial_port
         self._baud = baud
+
+        self._enable_grbl = enable_grbl
+        self._enable_force_sensor = enable_force_sensor
+        self._enable_controller = enable_controller
+        self._enable_camera = enable_camera
+        self._enable_laser = enable_laser
+        self._enable_weld_relay = enable_weld_relay
 
         self._grbl = None
         self._controller_input = None
@@ -109,12 +119,18 @@ class WeldController(QObject):
     def start(self) -> None:
         log.info("WeldController starting...")
         try:
-            self._init_grbl()
-            self._init_force_sensor()
-            self._init_controller()
-            self._init_camera()
-            self._init_laser()
-            self._init_weld_relay()
+            if self._enable_grbl:
+                self._init_grbl()
+            if self._enable_force_sensor:
+                self._init_force_sensor()
+            if self._enable_controller:
+                self._init_controller()
+            if self._enable_camera:
+                self._init_camera()
+            if self._enable_laser:
+                self._init_laser()
+            if self._enable_weld_relay:
+                self._init_weld_relay()
 
             self._set_laser(False)
             self._set_weld_relay(False)
