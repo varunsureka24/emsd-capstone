@@ -42,9 +42,11 @@ JOG_FEED = 2000
 COMMAND_INTERVAL = 0.2
 JOG_STEP_XY = COMMAND_INTERVAL * JOG_FEED / 60.0 * 0.5  # ~3.3 mm — 2-segment lookahead
 
-STICK_COMMAND_INTERVAL = 0.05  # 50 ms for analog stick — smoother response
-STICK_JOG_STEP_XY = STICK_COMMAND_INTERVAL * JOG_FEED / 60.0 * 1.5  # ~2.5 mm — overlaps interval so buffer never empties
-STICK_MIN_FEED = 2000  # mm/min — keeps motors above resonant frequency range
+STICK_COMMAND_INTERVAL = 0.02  # 50 ms for analog stick — smoother response
+STICK_OVERLAP = 1.5             # step covers 1.5× the interval so planner buffer never empties
+STICK_MIN_FEED = 1000           # mm/min — floor to keep motors above resonant frequency range
+STICK_MAX_FEED = 5000           # mm/min — speed at full deflection
+STICK_CURVE = 2.0               # response curve exponent: 1=linear, 2=quadratic, 3=more aggressive
 
 # FORCE / Z_LOWERING CURRENT THRESHOLD - need to flush out after determining limits 
 CONTACT_THRESHOLD = 780
@@ -454,9 +456,12 @@ class WeldController(QObject):
             if now - self._last_stick_jog_time < STICK_COMMAND_INTERVAL:
                 return
             stick_mag = min((data["stick_x"] ** 2 + data["stick_y"] ** 2) ** 0.5, 1.0)
-            dx = STICK_JOG_STEP_XY * data["stick_x"]
-            dy = STICK_JOG_STEP_XY * data["stick_y"]
-            feed = max(int(JOG_FEED * stick_mag), STICK_MIN_FEED)
+            feed = int(STICK_MIN_FEED + (STICK_MAX_FEED - STICK_MIN_FEED) * (stick_mag ** STICK_CURVE))
+            step = (feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
+            # Normalize direction so step distance always fills the interval —
+            # prevents tiny steps at small deflections that execute fast and leave idle gaps
+            dx = step * (data["stick_x"] / stick_mag)
+            dy = step * (data["stick_y"] / stick_mag)
         else:
             if now - self._last_jog_time < COMMAND_INTERVAL:
                 return

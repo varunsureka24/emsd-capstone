@@ -100,6 +100,8 @@ class GrblController:
         if dz != 0.0:
             cmd += f" Z{dz:.3f}"
         cmd += f" F{feed:.1f}"
+        if self.ser and self.ser.in_waiting:
+            self.ser.read(self.ser.in_waiting)
         return self.send_command(cmd, expect_response=False)
 
     def jog_cancel(self):
