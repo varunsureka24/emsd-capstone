@@ -42,6 +42,10 @@ JOG_FEED = 2000
 COMMAND_INTERVAL = 0.2
 JOG_STEP_XY = COMMAND_INTERVAL * JOG_FEED / 60.0 * 0.5  # ~3.3 mm — 2-segment lookahead
 
+STICK_COMMAND_INTERVAL = 0.05  # 50 ms for analog stick — smoother response
+STICK_JOG_STEP_XY = STICK_COMMAND_INTERVAL * JOG_FEED / 60.0 * 1.5  # ~2.5 mm — overlaps interval so buffer never empties
+STICK_MIN_FEED = 2000  # mm/min — keeps motors above resonant frequency range
+
 # FORCE / Z_LOWERING CURRENT THRESHOLD - need to flush out after determining limits 
 CONTACT_THRESHOLD = 780
 HARD_CONTACT_THRESHOLD = 650
@@ -102,7 +106,9 @@ class WeldController(QObject):
         self._sim_z = 0.0
 
         self._last_jog_time = 0.0
+        self._last_stick_jog_time = 0.0
         self._prev_hat = (0, 0)
+        self._prev_stick_active = False
 
         self._latest_force = None
         self._contact_counter = 0
@@ -440,27 +446,51 @@ class WeldController(QObject):
         )
 
         now = time.time()
-        if now - self._last_jog_time < COMMAND_INTERVAL:
-            return
-
         hat = (data["hat_x"], data["hat_y"])
-        dx = JOG_STEP_XY * data["hat_x"]
-        dy = JOG_STEP_XY * data["hat_y"]
+
+        # Thumbstick takes priority over D-pad when active
+        using_stick = data["stick_x"] != 0.0 or data["stick_y"] != 0.0
+        if using_stick:
+            if now - self._last_stick_jog_time < STICK_COMMAND_INTERVAL:
+                return
+            stick_mag = min((data["stick_x"] ** 2 + data["stick_y"] ** 2) ** 0.5, 1.0)
+            dx = STICK_JOG_STEP_XY * data["stick_x"]
+            dy = STICK_JOG_STEP_XY * data["stick_y"]
+            feed = max(int(JOG_FEED * stick_mag), STICK_MIN_FEED)
+        else:
+            if now - self._last_jog_time < COMMAND_INTERVAL:
+                return
+            dx = JOG_STEP_XY * data["hat_x"]
+            dy = JOG_STEP_XY * data["hat_y"]
+            feed = JOG_FEED
 
         if dx != 0.0 or dy != 0.0:
             if self._grbl:
-                self._grbl.jog(dx=dx, dy=dy, feed=JOG_FEED)
-                pos = self._grbl.get_position()
-                if pos is not None:
-                    self._sim_x, self._sim_y, self._sim_z = pos
+                self._grbl.jog(dx=dx, dy=dy, feed=feed)
+                if using_stick:
+                    # Dead-reckon to avoid blocking serial roundtrip during rapid stick commands
+                    self._sim_x += dx
+                    self._sim_y += dy
                     self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+                else:
+                    pos = self._grbl.get_position()
+                    if pos is not None:
+                        self._sim_x, self._sim_y, self._sim_z = pos
+                        self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
-            self._last_jog_time = now
+            if using_stick:
+                self._last_stick_jog_time = now
+            else:
+                self._last_jog_time = now
+        elif not using_stick and self._prev_stick_active:
+            if self._grbl:
+                self._grbl.jog_cancel()
         elif hat == (0, 0) and self._prev_hat != (0, 0):
             if self._grbl:
                 self._grbl.jog_cancel()
 
         self._prev_hat = hat
+        self._prev_stick_active = using_stick
 
     def _tick_camera_targeting(self) -> None:
         pass

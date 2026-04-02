@@ -100,7 +100,7 @@ class GrblController:
         if dz != 0.0:
             cmd += f" Z{dz:.3f}"
         cmd += f" F{feed:.1f}"
-        return self.send_command(cmd)
+        return self.send_command(cmd, expect_response=False)
 
     def jog_cancel(self):
         # 0x85 is GRBL's real-time jog-cancel byte: decelerates to a stop
