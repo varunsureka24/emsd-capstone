@@ -490,6 +490,10 @@ class WeldController(QObject):
         elif not using_stick and self._prev_stick_active:
             if self._grbl:
                 self._grbl.jog_cancel()
+                pos = self._grbl.get_position()
+                if pos is not None:
+                    self._sim_x, self._sim_y, self._sim_z = pos
+                    self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
         elif hat == (0, 0) and self._prev_hat != (0, 0):
             if self._grbl:
                 self._grbl.jog_cancel()
