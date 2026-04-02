@@ -111,6 +111,7 @@ class WeldController(QObject):
 
         self._weld_start_time = None
         self._z_raise_started = False
+        self._move_just_started = False
 
         self._force_history = deque(maxlen=5)
 
@@ -342,6 +343,7 @@ class WeldController(QObject):
         if self._grbl:
             self._grbl.move_to(z=Z_TRAVEL_HEIGHT, feed=Z_FEED_RATE)
             self._grbl.move_to(x=wp.x, y=wp.y, feed=XY_FEED_RATE)
+            self._move_just_started = True
 
     def _on_enter_z_lowering(self) -> None:
         self._contact_counter = 0
@@ -465,6 +467,10 @@ class WeldController(QObject):
         if not self._grbl:
             return
 
+        if self._move_just_started:
+            self._move_just_started = False
+            return
+
         pos = self._grbl.get_position()
         if pos is not None:
             self._sim_x, self._sim_y, self._sim_z = pos
@@ -478,6 +484,11 @@ class WeldController(QObject):
         self._sm.post_event(Event.FINE_POS_DONE)
 
     def _tick_z_lowering(self) -> None:
+        if not self._force_sensor:
+            self.log_message.emit("No force sensor — skipping Z lower")
+            self._sm.post_event(Event.Z_LOWER_DONE)
+            return
+
         if not self._grbl:
             return
 
