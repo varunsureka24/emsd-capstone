@@ -36,18 +36,18 @@ WELD_RELAY_GPIO_PIN = 23
 # GRBL INFO
 Z_TRAVEL_HEIGHT = 10.0
 XY_FEED_RATE = 3000
-Z_FEED_RATE = 300
+Z_FEED_RATE = 1000
 
 JOG_FEED = 2000
 COMMAND_INTERVAL = 0.2
-JOG_STEP_XY = COMMAND_INTERVAL * JOG_FEED / 60.0 * 2  # ~3.3 mm — 2-segment lookahead
+JOG_STEP_XY = COMMAND_INTERVAL * JOG_FEED / 60.0 * 0.5  # ~3.3 mm — 2-segment lookahead
 
 # FORCE / Z_LOWERING CURRENT THRESHOLD - need to flush out after determining limits 
 CONTACT_THRESHOLD = 780
 HARD_CONTACT_THRESHOLD = 650
 FORCE_DEBOUNCE_COUNT = 3
 Z_TOUCH_STEP = 0.2
-Z_TOUCH_FEED = 100
+Z_TOUCH_FEED = 1000
 Z_MAX_DESCENT = 8.0
 Z_STEP_INTERVAL = 0.10
 
@@ -111,6 +111,7 @@ class WeldController(QObject):
 
         self._weld_start_time = None
         self._z_raise_started = False
+        self._z_lower_started = False
         self._move_just_started = False
 
         self._force_history = deque(maxlen=5)
@@ -348,6 +349,7 @@ class WeldController(QObject):
     def _on_enter_z_lowering(self) -> None:
         self._contact_counter = 0
         self._last_z_step_time = 0.0
+        self._z_lower_started = False
 
         pos = self._grbl.get_position() if self._grbl else None
         if pos is not None:
@@ -484,11 +486,6 @@ class WeldController(QObject):
         self._sm.post_event(Event.FINE_POS_DONE)
 
     def _tick_z_lowering(self) -> None:
-        if not self._force_sensor:
-            self.log_message.emit("No force sensor — skipping Z lower")
-            self._sm.post_event(Event.Z_LOWER_DONE)
-            return
-
         if not self._grbl:
             return
 
@@ -496,6 +493,19 @@ class WeldController(QObject):
         if pos is not None:
             self._sim_x, self._sim_y, self._sim_z = pos
             self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+
+        if not self._force_sensor:
+            if not self._z_lower_started:
+                target_z = self._z_start_lowering - Z_MAX_DESCENT
+                self._grbl.move_to(z=target_z, feed=Z_FEED_RATE)
+                self._z_lower_started = True
+                return
+
+            state = self._grbl.get_machine_state()
+            if state == "Idle":
+                self.log_message.emit("Z lowered to max descent (no force sensor)")
+                self._sm.post_event(Event.Z_LOWER_DONE)
+            return
 
         if self._latest_force is not None:
             if self._latest_force <= HARD_CONTACT_THRESHOLD:
