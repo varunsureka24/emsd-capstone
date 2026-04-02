@@ -51,7 +51,7 @@ class SpotWelderGUI(QMainWindow):
         self.build_waypoints_tab()
 
         self.controller = WeldController(
-            enable_grbl=False,
+            enable_grbl=True,
             enable_force_sensor=False,
             enable_controller=False,
             enable_camera=True,

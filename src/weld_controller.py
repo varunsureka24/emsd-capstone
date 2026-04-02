@@ -38,9 +38,9 @@ Z_TRAVEL_HEIGHT = 10.0
 XY_FEED_RATE = 3000
 Z_FEED_RATE = 300
 
-JOG_STEP_XY = 1.0
-JOG_FEED = 500
+JOG_FEED = 2000
 COMMAND_INTERVAL = 0.2
+JOG_STEP_XY = COMMAND_INTERVAL * JOG_FEED / 60.0 * 2  # ~3.3 mm — 2-segment lookahead
 
 # FORCE / Z_LOWERING CURRENT THRESHOLD - need to flush out after determining limits 
 CONTACT_THRESHOLD = 780
@@ -66,7 +66,7 @@ class WeldController(QObject):
     laser_state_changed = pyqtSignal(bool)
     force_updated = pyqtSignal(int)
 
-    def __init__(self, serial_port: str = DEFAULT_SERIAL_PORT, baud: int = DEFAULT_BAUD,
+    def __init__(self, serial_port: str = "COM3", baud: int = DEFAULT_BAUD,
                  enable_grbl: bool = True, enable_force_sensor: bool = True,
                  enable_controller: bool = True, enable_camera: bool = True,
                  enable_laser: bool = True, enable_weld_relay: bool = True):
@@ -102,6 +102,7 @@ class WeldController(QObject):
         self._sim_z = 0.0
 
         self._last_jog_time = 0.0
+        self._prev_hat = (0, 0)
 
         self._latest_force = None
         self._contact_counter = 0
@@ -110,6 +111,7 @@ class WeldController(QObject):
 
         self._weld_start_time = None
         self._z_raise_started = False
+        self._move_just_started = False
 
         self._force_history = deque(maxlen=5)
 
@@ -341,6 +343,7 @@ class WeldController(QObject):
         if self._grbl:
             self._grbl.move_to(z=Z_TRAVEL_HEIGHT, feed=Z_FEED_RATE)
             self._grbl.move_to(x=wp.x, y=wp.y, feed=XY_FEED_RATE)
+            self._move_just_started = True
 
     def _on_enter_z_lowering(self) -> None:
         self._contact_counter = 0
@@ -438,6 +441,7 @@ class WeldController(QObject):
         if now - self._last_jog_time < COMMAND_INTERVAL:
             return
 
+        hat = (data["hat_x"], data["hat_y"])
         dx = JOG_STEP_XY * data["hat_x"]
         dy = JOG_STEP_XY * data["hat_y"]
 
@@ -450,12 +454,21 @@ class WeldController(QObject):
                     self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
             self._last_jog_time = now
+        elif hat == (0, 0) and self._prev_hat != (0, 0):
+            if self._grbl:
+                self._grbl.jog_cancel()
+
+        self._prev_hat = hat
 
     def _tick_camera_targeting(self) -> None:
         pass
 
     def _tick_move_to_position(self) -> None:
         if not self._grbl:
+            return
+
+        if self._move_just_started:
+            self._move_just_started = False
             return
 
         pos = self._grbl.get_position()
@@ -471,6 +484,11 @@ class WeldController(QObject):
         self._sm.post_event(Event.FINE_POS_DONE)
 
     def _tick_z_lowering(self) -> None:
+        if not self._force_sensor:
+            self.log_message.emit("No force sensor — skipping Z lower")
+            self._sm.post_event(Event.Z_LOWER_DONE)
+            return
+
         if not self._grbl:
             return
 
