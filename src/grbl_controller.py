@@ -92,21 +92,28 @@ class GrblController:
             return None
 
     def jog(self, dx=0.0, dy=0.0, dz=0.0, feed=500.0):
-        parts = ["$J=G91"]
+        cmd = "$J=G91 G21"
         if dx != 0.0:
-            parts.append(f"X{dx:.3f}")
+            cmd += f" X{dx:.3f}"
         if dy != 0.0:
-            parts.append(f"Y{dy:.3f}")
+            cmd += f" Y{dy:.3f}"
         if dz != 0.0:
-            parts.append(f"Z{dz:.3f}")
-        parts.append(f"F{feed:.1f}")
-        return self.send_command(" ".join(parts))
+            cmd += f" Z{dz:.3f}"
+        cmd += f" F{feed:.1f}"
+        return self.send_command(cmd)
+
+    def jog_cancel(self):
+        # 0x85 is GRBL's real-time jog-cancel byte: decelerates to a stop
+        # without triggering an alarm, and flushes queued jog segments
+        if self.ser:
+            self.ser.write(b"\x85")
+            self.ser.flush()
 
     def home(self):
         return self.send_command("$H")
 
     def move_to(self, x=None, y=None, z=None, feed=3000.0):
-        parts = ["G90", "G0"]
+        parts = ["G90", "G1"]
         if x is not None:
             parts.append(f"X{x:.3f}")
         if y is not None:
