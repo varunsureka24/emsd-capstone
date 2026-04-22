@@ -115,7 +115,7 @@ class GrblController:
         return self.send_command("$H")
 
     def move_to(self, x=None, y=None, z=None, feed=3000.0):
-        parts = ["G90", "G1"]
+        parts = ["G53", "G21", "G1"]
         if x is not None:
             parts.append(f"X{x:.3f}")
         if y is not None:
@@ -124,7 +124,9 @@ class GrblController:
             parts.append(f"Z{z:.3f}")
         if feed is not None:
             parts.append(f"F{feed:.1f}")
-        return self.send_command(" ".join(parts))
+        cmd = " ".join(parts)
+        print(f"[GRBL] move_to sending: {cmd}")
+        return self.send_command(cmd)
 
     def feed_hold(self):
         if self.ser:

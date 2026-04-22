@@ -20,7 +20,7 @@ class ControllerInput:
             return "No controller"
         return self.joystick.get_name()
 
-    STICK_DEADZONE = 0.12
+    STICK_DEADZONE = 0.25
     # Minor axis must be at least this fraction of the major axis to allow diagonal movement.
     # 0.41 ≈ tan(22.5°), meaning the stick must be within 22.5° of a diagonal to move diagonally;
     # anything closer to a cardinal axis snaps to pure X or Y.

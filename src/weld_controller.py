@@ -109,6 +109,7 @@ class WeldController(QObject):
 
         self._last_jog_time = 0.0
         self._last_stick_jog_time = 0.0
+        self._last_stick_pos_sync_time = 0.0
         self._prev_hat = (0, 0)
         self._prev_stick_active = False
 
@@ -344,15 +345,21 @@ class WeldController(QObject):
             return
 
         wp = self._weld_queue[self._current_wp_index]
+        print(f"[MOVE] Waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}: target X={wp.x:.3f}, Y={wp.y:.3f}")
+
+        if self._grbl:
+            grbl_pos_before = self._grbl.get_position()
+            print(f"[MOVE] GRBL position before move: {grbl_pos_before}")
+            resp_z = self._grbl.move_to(z=Z_TRAVEL_HEIGHT, feed=Z_FEED_RATE)
+            print(f"[MOVE] move_to Z={Z_TRAVEL_HEIGHT} response: {resp_z}")
+            resp_xy = self._grbl.move_to(x=wp.x, y=wp.y, feed=XY_FEED_RATE)
+            print(f"[MOVE] move_to X={wp.x:.3f} Y={wp.y:.3f} response: {resp_xy}")
+            self._move_just_started = True
+
         self.log_message.emit(
             f"Moving to waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}: "
             f"X={wp.x:.2f}, Y={wp.y:.2f}"
         )
-
-        if self._grbl:
-            self._grbl.move_to(z=Z_TRAVEL_HEIGHT, feed=Z_FEED_RATE)
-            self._grbl.move_to(x=wp.x, y=wp.y, feed=XY_FEED_RATE)
-            self._move_just_started = True
 
     def _on_enter_z_lowering(self) -> None:
         self._contact_counter = 0
@@ -360,11 +367,13 @@ class WeldController(QObject):
         self._z_lower_started = False
 
         pos = self._grbl.get_position() if self._grbl else None
+        print(f"[Z_LOWER] entering Z_LOWERING, GRBL pos={pos}")
         if pos is not None:
             self._sim_x, self._sim_y, self._sim_z = pos
             self._z_start_lowering = self._sim_z
         else:
             self._z_start_lowering = self._sim_z
+        print(f"[Z_LOWER] z_start_lowering={self._z_start_lowering}, target will be z={self._z_start_lowering - Z_MAX_DESCENT:.3f}")
 
         self.log_message.emit("Searching for contact with force sensor...")
 
@@ -382,10 +391,14 @@ class WeldController(QObject):
 
     def _on_enter_set_weld_point(self) -> None:
         pos = self._grbl.get_position() if self._grbl else None
+        print(f"[CAPTURE] GRBL raw position: {pos}")
+        print(f"[CAPTURE] sim_x={self._sim_x:.3f}, sim_y={self._sim_y:.3f}, sim_z={self._sim_z:.3f}")
         if pos is not None:
             self._sim_x, self._sim_y, self._sim_z = pos
+            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
         wp = Waypoint(x=self._sim_x, y=self._sim_y)
+        print(f"[CAPTURE] Saving waypoint: X={wp.x:.3f}, Y={wp.y:.3f}")
         self._waypoints.add(wp)
         self.log_message.emit(
             f"Waypoint {len(self._waypoints)} saved: X={self._sim_x:.2f}, Y={self._sim_y:.2f}"
@@ -473,10 +486,13 @@ class WeldController(QObject):
             if self._grbl:
                 self._grbl.jog(dx=dx, dy=dy, feed=feed)
                 if using_stick:
-                    # Dead-reckon to avoid blocking serial roundtrip during rapid stick commands
-                    self._sim_x += dx
-                    self._sim_y += dy
-                    self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+                    # Sync position from GRBL every 200 ms during stick jogging.
+                    if now - self._last_stick_pos_sync_time >= 0.2:
+                        pos = self._grbl.get_position()
+                        if pos is not None:
+                            self._sim_x, self._sim_y, self._sim_z = pos
+                            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+                        self._last_stick_pos_sync_time = now
                 else:
                     pos = self._grbl.get_position()
                     if pos is not None:
@@ -512,13 +528,17 @@ class WeldController(QObject):
             self._move_just_started = False
             return
 
+        raw = self._grbl.query_status_line()
+        print(f"[TICK_MOVE] raw status: {raw}")
         pos = self._grbl.get_position()
         if pos is not None:
             self._sim_x, self._sim_y, self._sim_z = pos
             self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
         state = self._grbl.get_machine_state()
+        print(f"[TICK_MOVE] pos={pos}  state={state}")
         if state == "Idle":
+            print(f"[TICK_MOVE] reached idle — firing POSITION_REACHED")
             self._sm.post_event(Event.POSITION_REACHED)
 
     def _tick_fine_positioning(self) -> None:
