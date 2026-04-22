@@ -125,7 +125,6 @@ class GrblController:
         if feed is not None:
             parts.append(f"F{feed:.1f}")
         cmd = " ".join(parts)
-        print(f"[GRBL] move_to sending: {cmd}")
         return self.send_command(cmd)
 
     def feed_hold(self):
