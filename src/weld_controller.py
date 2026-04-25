@@ -379,8 +379,9 @@ class WeldController(QObject):
     def _on_enter_execute_weld(self) -> None:
         self._weld_start_time = time.time()
         self._set_weld_relay(True)
+        prefix = "[DRY RUN] " if not self._enable_weld_relay else ""
         self.log_message.emit(
-            f"Weld relay ON at waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}"
+            f"{prefix}Weld relay ON at waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}"
         )
 
     def _on_enter_z_raising(self) -> None:
