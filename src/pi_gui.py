@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 import cv2
@@ -16,6 +17,10 @@ from weld_controller import WeldController
 from state_machine import Event
 
 log = logging.getLogger(__name__)
+
+_CONTROLLER_IMG = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "images", "Controller Layout.png"
+)
 
 _STATE_DISPLAY = {
     "SYSTEM_INIT":            ("Initializing",   "System"),
@@ -52,9 +57,9 @@ class SpotWelderGUI(QMainWindow):
         self.build_waypoints_tab()
 
         self.controller = WeldController(
-            enable_grbl=True,
+            enable_grbl=False,
             enable_force_sensor=False,
-            enable_controller=True,
+            enable_controller=False,
             enable_camera=False,
             enable_laser=False,
             enable_weld_relay=False,
@@ -136,9 +141,14 @@ class SpotWelderGUI(QMainWindow):
         )
         self.pause_btn.setEnabled(False)
 
+        controller_img_group = QGroupBox("Controller Layout")
+        controller_img_layout = QVBoxLayout()
+        controller_img_layout.addWidget(self._controller_image_label())
+        controller_img_group.setLayout(controller_img_layout)
+
         right_panel.addWidget(status_group)
         right_panel.addWidget(controls_group)
-        right_panel.addStretch()
+        right_panel.addWidget(controller_img_group)
 
         top_layout.addWidget(camera_group, 2)
         top_layout.addLayout(right_panel, 1)
@@ -202,10 +212,28 @@ class SpotWelderGUI(QMainWindow):
 
         actions_group.setLayout(actions_layout)
 
+        controller_img_group = QGroupBox("Controller Layout")
+        controller_img_layout = QVBoxLayout()
+        controller_img_layout.addWidget(self._controller_image_label())
+        controller_img_group.setLayout(controller_img_layout)
+
         left_panel.addWidget(pose_group)
         left_panel.addWidget(jog_group)
         left_panel.addWidget(actions_group)
         left_panel.addStretch()
+        left_panel.addWidget(controller_img_group)
+
+        # Right column: camera stream on top, waypoint table on bottom
+        wp_camera_group = QGroupBox("Camera View")
+        wp_camera_layout = QVBoxLayout()
+        self.wp_camera_label = QLabel("Camera Feed")
+        self.wp_camera_label.setAlignment(Qt.AlignCenter)
+        self.wp_camera_label.setMinimumSize(320, 240)
+        self.wp_camera_label.setStyleSheet(
+            "background-color: black; color: white; border: 1px solid black;"
+        )
+        wp_camera_layout.addWidget(self.wp_camera_label)
+        wp_camera_group.setLayout(wp_camera_layout)
 
         table_group = QGroupBox("Waypoint List")
         table_layout = QVBoxLayout()
@@ -219,8 +247,12 @@ class SpotWelderGUI(QMainWindow):
         table_layout.addWidget(self.wp_table)
         table_group.setLayout(table_layout)
 
+        right_column = QVBoxLayout()
+        right_column.addWidget(wp_camera_group, 1)
+        right_column.addWidget(table_group, 1)
+
         main_layout.addLayout(left_panel, 1)
-        main_layout.addWidget(table_group, 2)
+        main_layout.addLayout(right_column, 2)
         self.waypoints_tab.setLayout(main_layout)
 
     # ------------------------------------------------------------------
@@ -378,6 +410,16 @@ class SpotWelderGUI(QMainWindow):
     # ------------------------------------------------------------------
     # Visual helpers
     # ------------------------------------------------------------------
+    def _controller_image_label(self) -> QLabel:
+        lbl = QLabel()
+        lbl.setAlignment(Qt.AlignCenter)
+        pixmap = QPixmap(_CONTROLLER_IMG)
+        if not pixmap.isNull():
+            lbl.setPixmap(pixmap.scaled(560, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            lbl.setText("Controller Layout\n(image not found)")
+        return lbl
+
     def _set_jog_button_highlights(self, left=False, right=False, up=False, down=False):
         active_style = "background-color: #90ee90; font-weight: bold;"
         inactive_style = ""
@@ -394,18 +436,14 @@ class SpotWelderGUI(QMainWindow):
         try:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb.shape
-            bytes_per_line = ch * w
-            qimg = QImage(
-                rgb.data, w, h, bytes_per_line, QImage.Format_RGB888
-            )
+            qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(qimg)
 
             self.camera_label.setPixmap(
-                pixmap.scaled(
-                    self.camera_label.size(),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
+                pixmap.scaled(self.camera_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+            self.wp_camera_label.setPixmap(
+                pixmap.scaled(self.wp_camera_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
         except Exception as exc:
             log.warning("Failed to update camera frame: %s", exc)
