@@ -22,7 +22,7 @@ except Exception:
 DEFAULT_SERIAL_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
 
-FORCE_SENSOR_PORT = "/dev/ttyUSB0"
+FORCE_SENSOR_PORT = "/dev/ttyUSB0"   # verify with: ls /dev/ttyUSB*
 FORCE_SENSOR_BAUD = 115200
 
 CAMERA_INDEX = 0
@@ -34,7 +34,7 @@ LASER_GPIO_PIN = 18
 WELD_RELAY_GPIO_PIN = 23
 
 # GRBL INFO
-Z_TRAVEL_HEIGHT = 10.0
+Z_TRAVEL_HEIGHT_DEFAULT = 25.0   # mm — fallback if user cancels the startup prompt
 XY_FEED_RATE = 3000
 Z_FEED_RATE = 1000
 
@@ -48,10 +48,13 @@ STICK_MIN_FEED = 1000           # mm/min — floor to keep motors above resonant
 STICK_MAX_FEED = 5000           # mm/min — speed at full deflection
 STICK_CURVE = 2.0               # response curve exponent: 1=linear, 2=quadratic, 3=more aggressive
 
-# FORCE / Z_LOWERING CURRENT THRESHOLD - need to flush out after determining limits 
-CONTACT_THRESHOLD = 780
-HARD_CONTACT_THRESHOLD = 650
-FORCE_DEBOUNCE_COUNT = 3
+# FORCE / Z_LOWERING THRESHOLDS (units: kg, matching Arduino output)
+# With probe in air the reading will vary ~0.0–0.6 kg due to HX711 noise.
+# Tune CONTACT_THRESHOLD after physical testing; it must sit comfortably
+# above the at-rest noise floor.
+CONTACT_THRESHOLD = 2.0        # kg — light contact detected, stop Z
+HARD_CONTACT_THRESHOLD = 8.0   # kg — dangerous overload, emergency stop
+FORCE_DEBOUNCE_COUNT = 3       # consecutive readings required before acting
 Z_TOUCH_STEP = 0.2
 Z_TOUCH_FEED = 1000
 Z_MAX_DESCENT = 8.0
@@ -70,7 +73,7 @@ class WeldController(QObject):
     controller_jog_visual = pyqtSignal(bool, bool, bool, bool)
     camera_frame_ready = pyqtSignal(object)
     laser_state_changed = pyqtSignal(bool)
-    force_updated = pyqtSignal(int)
+    force_updated = pyqtSignal(float)
 
     def __init__(self, serial_port: str = "COM3", baud: int = DEFAULT_BAUD,
                  enable_grbl: bool = True, enable_force_sensor: bool = True,
@@ -106,6 +109,7 @@ class WeldController(QObject):
         self._sim_x = 0.0
         self._sim_y = 0.0
         self._sim_z = 0.0
+        self._travel_height: float = Z_TRAVEL_HEIGHT_DEFAULT
 
         self._last_jog_time = 0.0
         self._last_stick_jog_time = 0.0
@@ -192,6 +196,14 @@ class WeldController(QObject):
         except Exception:
             pass
 
+    def set_travel_height(self, height_mm: float) -> None:
+        self._travel_height = max(5.0, min(80.0, height_mm))
+        self.log_message.emit(f"Travel height set to {self._travel_height:.1f} mm")
+
+    @property
+    def travel_height(self) -> float:
+        return self._travel_height
+
     def post_event(self, event: Event) -> bool:
         return self._sm.post_event(event)
 
@@ -275,14 +287,9 @@ class WeldController(QObject):
             self._laser = None
 
     def _init_weld_relay(self) -> None:
-        if LED is None:
-            self._weld_relay = None
-            return
-        try:
-            self._weld_relay = LED(WELD_RELAY_GPIO_PIN)
-            self._weld_relay.off()
-        except Exception:
-            self._weld_relay = None
+        # Relay is on the toolhead Arduino (pin 7); controlled via serial commands.
+        # No GPIO init needed.
+        pass
 
     def _set_laser(self, on: bool) -> None:
         try:
@@ -298,13 +305,12 @@ class WeldController(QObject):
             self.laser_state_changed.emit(on)
 
     def _set_weld_relay(self, on: bool) -> None:
+        if not self._enable_weld_relay:
+            return
+        cmd = "WELD_ON" if on else "WELD_OFF"
         try:
-            if self._weld_relay is None:
-                return
-            if on:
-                self._weld_relay.on()
-            else:
-                self._weld_relay.off()
+            if self._force_sensor:
+                self._force_sensor.send_command(cmd)
         except Exception:
             pass
 
@@ -347,7 +353,7 @@ class WeldController(QObject):
         wp = self._weld_queue[self._current_wp_index]
 
         if self._grbl:
-            self._grbl.move_to(z=Z_TRAVEL_HEIGHT, feed=Z_FEED_RATE)
+            self._grbl.move_to(z=self._travel_height, feed=Z_FEED_RATE)
             self._grbl.move_to(x=wp.x, y=wp.y, feed=XY_FEED_RATE)
             self._move_just_started = True
 
@@ -553,19 +559,19 @@ class WeldController(QObject):
             return
 
         if self._latest_force is not None:
-            if self._latest_force <= HARD_CONTACT_THRESHOLD:
+            if self._latest_force >= HARD_CONTACT_THRESHOLD:
                 self.log_message.emit("Hard contact threshold reached")
                 self._grbl.feed_hold()
                 self._sm.post_event(Event.ERROR_OCCURRED)
                 return
 
-            if self._latest_force <= CONTACT_THRESHOLD:
+            if self._latest_force >= CONTACT_THRESHOLD:
                 self._contact_counter += 1
             else:
                 self._contact_counter = 0
 
             if self._contact_counter >= FORCE_DEBOUNCE_COUNT:
-                self.log_message.emit("Contact detected")
+                self.log_message.emit("Contact confirmed — weld about to fire")
                 self._grbl.feed_hold()
                 self._sm.post_event(Event.Z_LOWER_DONE)
                 return
@@ -596,7 +602,7 @@ class WeldController(QObject):
             return
 
         if not self._z_raise_started:
-            self._grbl.move_to(z=Z_TRAVEL_HEIGHT, feed=Z_FEED_RATE)
+            self._grbl.move_to(z=self._travel_height, feed=Z_FEED_RATE)
             self._z_raise_started = True
             return
 
