@@ -25,11 +25,19 @@ class ForceSensorReader:
 
             if line.startswith("FSR:"):
                 try:
-                    self.latest_value = int(line.split(":", 1)[1])
+                    self.latest_value = float(line.split(":", 1)[1])
                 except ValueError:
                     pass
             else:
                 try:
-                    self.latest_value = int(line)
+                    self.latest_value = float(line)
                 except ValueError:
                     pass
+
+    def send_command(self, cmd: str) -> None:
+        if self.ser and self.ser.is_open:
+            self.ser.write((cmd + "\n").encode("ascii"))
+
+    def close(self) -> None:
+        if self.ser and self.ser.is_open:
+            self.ser.close()

@@ -6,9 +6,10 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-    QTextEdit
+    QTextEdit,
+    QDialog, QDoubleSpinBox, QDialogButtonBox, QFormLayout,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 
 from weld_controller import WeldController
@@ -51,13 +52,14 @@ class SpotWelderGUI(QMainWindow):
         self.build_waypoints_tab()
 
         self.controller = WeldController(
-            enable_grbl=False,
+            enable_grbl=True,
             enable_force_sensor=False,
-            enable_controller=False,
-            enable_camera=True,
+            enable_controller=True,
+            enable_camera=False,
             enable_laser=False,
             enable_weld_relay=False,
         )
+        self._travel_height_prompted = False
         self._connect_controller()
         self.controller.start()
 
@@ -96,6 +98,7 @@ class SpotWelderGUI(QMainWindow):
         self.progress_label = QLabel("Waypoint Progress: 0 / 0")
         self.laser_label = QLabel("Laser: OFF")
         self.force_label = QLabel("Force Sensor: --")
+        self.travel_height_label = QLabel("Travel Z: 25.0 mm")
 
         for lbl in (
             self.state_label,
@@ -106,6 +109,7 @@ class SpotWelderGUI(QMainWindow):
             self.progress_label,
             self.laser_label,
             self.force_label,
+            self.travel_height_label,
         ):
             status_layout.addWidget(lbl)
 
@@ -123,6 +127,8 @@ class SpotWelderGUI(QMainWindow):
         controls_layout.addWidget(self.pause_btn, 0, 1)
         controls_layout.addWidget(self.estop_btn, 1, 0, 1, 2)
         controls_layout.addWidget(self.home_btn, 2, 0, 1, 2)
+        self.set_travel_height_btn = QPushButton("Set Travel Height…")
+        controls_layout.addWidget(self.set_travel_height_btn, 3, 0, 1, 2)
         controls_group.setLayout(controls_layout)
 
         self.estop_btn.setStyleSheet(
@@ -250,6 +256,8 @@ class SpotWelderGUI(QMainWindow):
         self.delete_btn.clicked.connect(self._on_delete_waypoint)
         self.clear_btn.clicked.connect(c.clear_waypoints)
 
+        self.set_travel_height_btn.clicked.connect(self._on_set_travel_height)
+
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
@@ -258,6 +266,10 @@ class SpotWelderGUI(QMainWindow):
         self.controller.post_event(Event.START_WELD_SEQUENCE)
 
     def _on_state_changed(self, state_name: str):
+        if state_name == "IDLE" and not self._travel_height_prompted:
+            self._travel_height_prompted = True
+            QTimer.singleShot(0, self._prompt_travel_height_startup)
+
         display, mode = _STATE_DISPLAY.get(state_name, (state_name, "—"))
         self.state_label.setText(f"State: {display}")
         self.mode_label.setText(f"Mode: {mode}")
@@ -269,6 +281,7 @@ class SpotWelderGUI(QMainWindow):
 
         self.start_weld_seq_btn.setEnabled(state_name == "IDLE")
         self.home_btn.setEnabled(state_name in ("IDLE", "MANUAL_JOG"))
+        self.set_travel_height_btn.setEnabled(state_name in ("IDLE", "MANUAL_JOG"))
         self.enter_jog_btn.setEnabled(state_name == "IDLE")
         self.exit_jog_btn.setEnabled(state_name == "MANUAL_JOG")
         self.capture_btn.setEnabled(state_name in ("MANUAL_JOG", "CAMERA_LASER_TARGETING"))
@@ -296,6 +309,59 @@ class SpotWelderGUI(QMainWindow):
 
     def _on_force_updated(self, value: int):
         self.force_label.setText(f"Force Sensor: {value}")
+
+    # ------------------------------------------------------------------
+    # Travel-height dialog
+    # ------------------------------------------------------------------
+    _TRAVEL_HEIGHT_MIN = 5.0
+    _TRAVEL_HEIGHT_MAX = 80.0
+    _TRAVEL_HEIGHT_DEFAULT = 25.0
+
+    def _ask_travel_height(self, current: float) -> float:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Set Safe Z Travel Height")
+        dlg.setModal(True)
+
+        spin = QDoubleSpinBox()
+        spin.setRange(self._TRAVEL_HEIGHT_MIN, self._TRAVEL_HEIGHT_MAX)
+        spin.setDecimals(1)
+        spin.setSingleStep(1.0)
+        spin.setSuffix(" mm")
+        spin.setValue(current)
+
+        note = QLabel(
+            "Enter the height Z raises to before XY moves.\n"
+            "Set this 25–50 mm (1–2 inches) above your weld surface.\n"
+            f"Range: {self._TRAVEL_HEIGHT_MIN:.0f} – {self._TRAVEL_HEIGHT_MAX:.0f} mm"
+        )
+        note.setWordWrap(True)
+
+        buttons = QDialogButtonBox()
+        ok_btn = buttons.addButton("Set Height", QDialogButtonBox.AcceptRole)
+        buttons.addButton("Use Default (25 mm)", QDialogButtonBox.RejectRole)
+        ok_btn.setDefault(True)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        form = QFormLayout()
+        form.addRow("Travel height:", spin)
+        layout = QVBoxLayout()
+        layout.addWidget(note)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        dlg.setLayout(layout)
+
+        return spin.value() if dlg.exec_() == QDialog.Accepted else self._TRAVEL_HEIGHT_DEFAULT
+
+    def _prompt_travel_height_startup(self):
+        height = self._ask_travel_height(current=self._TRAVEL_HEIGHT_DEFAULT)
+        self.controller.set_travel_height(height)
+        self.travel_height_label.setText(f"Travel Z: {height:.1f} mm")
+
+    def _on_set_travel_height(self):
+        height = self._ask_travel_height(current=self.controller.travel_height)
+        self.controller.set_travel_height(height)
+        self.travel_height_label.setText(f"Travel Z: {height:.1f} mm")
 
     def _refresh_waypoint_table(self, wp_list: list):
         self.wp_table.setRowCount(len(wp_list))
