@@ -111,8 +111,22 @@ class GrblController:
             self.ser.write(b"\x85")
             self.ser.flush()
 
-    def home(self):
-        return self.send_command("$H")
+    def home(self, timeout: float = 60.0):
+        if not self.ser:
+            return []
+        self._write_raw("$H\n")
+        lines = []
+        start = time.time()
+        while time.time() - start < timeout:
+            if self.ser.in_waiting:
+                resp = self.ser.readline().decode("ascii", errors="ignore").strip()
+                if resp:
+                    lines.append(resp)
+                    if resp.startswith("ok") or resp.startswith("error"):
+                        break
+            else:
+                time.sleep(0.05)
+        return lines
 
     def move_to(self, x=None, y=None, z=None, feed=3000.0):
         parts = ["G53", "G21", "G1"]

@@ -76,7 +76,8 @@ class WeldController(QObject):
     force_updated = pyqtSignal(float)
 
     def __init__(self, serial_port: str = "COM3", baud: int = DEFAULT_BAUD,
-                 enable_grbl: bool = True, enable_force_sensor: bool = True,
+                 enable_grbl: bool = True, enable_homing: bool = True,
+                 enable_force_sensor: bool = True,
                  enable_controller: bool = True, enable_camera: bool = True,
                  enable_laser: bool = True, enable_weld_relay: bool = True):
         super().__init__()
@@ -85,6 +86,7 @@ class WeldController(QObject):
         self._baud = baud
 
         self._enable_grbl = enable_grbl
+        self._enable_homing = enable_homing
         self._enable_force_sensor = enable_force_sensor
         self._enable_controller = enable_controller
         self._enable_camera = enable_camera
@@ -137,6 +139,8 @@ class WeldController(QObject):
         try:
             if self._enable_grbl:
                 self._init_grbl()
+            if self._enable_homing and self._grbl:
+                self._run_homing()
             if self._enable_force_sensor:
                 self._init_force_sensor()
             if self._enable_controller:
@@ -218,9 +222,21 @@ class WeldController(QObject):
     def home(self) -> None:
         if not self._grbl:
             return
+        self._run_homing()
+
+    def _run_homing(self) -> None:
         self.log_message.emit("Homing... ($H)")
         resp = self._grbl.home()
-        self.log_message.emit(f"GRBL: {resp}")
+        self.log_message.emit(f"GRBL homing response: {resp}")
+        pos = self._grbl.get_position()
+        if pos is not None:
+            self._sim_x, self._sim_y, self._sim_z = pos
+            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+            self.log_message.emit(
+                f"Position after home: X={self._sim_x:.2f}, Y={self._sim_y:.2f}, Z={self._sim_z:.2f}"
+            )
+        else:
+            self.log_message.emit("Warning: could not read position after homing")
 
     def prepare_weld_queue(self) -> None:
         self._weld_queue = list(self._waypoints.get_all())
