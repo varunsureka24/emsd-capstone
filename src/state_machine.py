@@ -43,6 +43,8 @@ class State(Enum):
     EXECUTE_WELD            = auto()
     Z_RAISING               = auto()
 
+    MANUAL_WELD             = auto()
+
 
 # ---------------------------------------------------------------------------
 # Events  (the triggers that cause transitions)
@@ -79,6 +81,11 @@ class Event(Enum):
     ERROR_OCCURRED          = auto()
     ERROR_ACKNOWLEDGED      = auto()
 
+    # Manual Weld 
+    ENTER_MANUAL_WELD       = auto()
+    EXIT_MANUAL_WELD        = auto()
+    MANUAL_WELD_TRIGGER     = auto()
+
 
 # ---------------------------------------------------------------------------
 # Transition table
@@ -114,6 +121,11 @@ TRANSITIONS: dict[tuple[State, Event], State] = {
     # ── Error recovery ───────────────────────────────────────────────
     (State.ERROR,            Event.ERROR_ACKNOWLEDGED):   State.SYSTEM_INIT,
     (State.ERROR,            Event.RESET):                State.SYSTEM_INIT,
+
+    # ── Manual weld ───────────────────────────────────────────────
+    (State.IDLE, Event.ENTER_MANUAL_WELD): State.MANUAL_WELD,
+    (State.MANUAL_WELD, Event.EXIT_MANUAL_WELD): State.IDLE,
+
 }
 
 # E-stop can fire from ANY state (handled specially in post_event).
