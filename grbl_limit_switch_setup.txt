@@ -1,0 +1,68 @@
+GRBL LIMIT SWITCH SETUP — HOMING CONFIGURATION
+================================================
+
+AXIS CONVENTION
+---------------
+- Positive X/Y = working/jogging direction (home is at the min corner)
+- Positive Z = up, Negative Z = down (home is at the top of Z travel)
+
+
+STEP 1: WIRE THE LIMIT SWITCHES
+--------------------------------
+Use normally-open (NO) microswitches.
+For each switch, connect:
+  - One terminal  →  signal pin on CNC shield (X-, Y-, or Z-)
+  - Other terminal →  GND pin on CNC shield
+
+Switch placement:
+  - X switch: at the MINIMUM X end (the corner the gantry starts from)
+  - Y switch: at the MINIMUM Y end (the corner the gantry starts from)
+  - Z switch: at the TOP of Z travel (maximum Z position)
+
+
+STEP 2: OPEN A SERIAL TERMINAL TO THE ARDUINO
+----------------------------------------------
+Baud rate: 115200
+(Use Arduino Serial Monitor, PuTTY, or similar)
+
+
+STEP 3: SEND THESE GRBL SETTINGS
+----------------------------------
+Type each line and press Enter, wait for "ok" before the next:
+
+  $22=1    <- enable homing cycle ($H command)
+  $23=3    <- invert X and Y homing direction so they home toward -X/-Y (min switches)
+             Z is NOT inverted — GRBL homes Z upward (+Z) by default, which is what we want
+  $21=1    <- enable hard limits (machine stops if a switch is hit during normal operation)
+
+To verify settings were saved, send:  $$
+Look for $22, $23, $21 in the output.
+
+
+STEP 4: TEST HOMING
+--------------------
+Send:  $H
+
+Expected sequence:
+  1. Z moves UP first until it hits the top switch
+  2. X and Y move toward their min switches simultaneously
+  3. Machine reports "ok" when done
+
+After homing, send:  ?
+Position should show:  WPos:0.000,0.000,0.000
+
+
+STEP 5: VERIFY JOGGING DIRECTION
+----------------------------------
+Jog in +X → machine should move AWAY from the X switch
+Jog in +Y → machine should move AWAY from the Y switch
+Jog in -Z → welding head should move DOWN toward the workpiece
+
+
+TROUBLESHOOTING
+---------------
+- If Z moves DOWN instead of up during homing: add 4 to $23 (set $23=7)
+- If X or Y homes in the wrong direction: remove 1 or 2 from $23 accordingly
+- If homing triggers immediately without moving: check switch wiring (may be shorted)
+- If homing never triggers: check switch wiring (may be open / wrong pins)
+- "ALARM:1" after $H = limit switch hit before homing started, send $X to unlock then retry
