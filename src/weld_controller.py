@@ -135,6 +135,8 @@ class WeldController(QObject):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
 
+        self._manual_weld_active = False
+
     def start(self) -> None:
         log.info("WeldController starting...")
         try:
@@ -377,7 +379,7 @@ class WeldController(QObject):
         self.log_message.emit(
             f"Moving to waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}: "
             f"Laser X={wp.x:.2f}, Y={wp.y:.2f} -> "
-            f"Toolhead X={wp.x + X_OFFSET:.2f}, Y={wp.y:.2f}"
+            f"Toolhead X={wp.x + X_OFFSET:.2f}, Y={wp.y:.2f}" # possibly remove for UI simplicity
         )
 
     def _on_enter_z_lowering(self) -> None:
@@ -420,6 +422,26 @@ class WeldController(QObject):
         )
         self._sm.post_event(Event.WELD_POINT_SAVED)
         self.waypoints_updated.emit(self._waypoints.to_json_list())
+    
+    def _start_manual_weld_from_current_pose(self) -> None:
+        pos = self._grbl.get_position() if self._grbl else None
+        if pos is not None:
+            self._sim_x, self._sim_y, self._sim_z = pos
+            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+
+        laser_wp = Waypoint(x=self._sim_x, y=self._sim_y)
+
+        self._manual_weld_active = True
+        self._weld_queue = [laser_wp]
+        self._current_wp_index = 0
+
+        self.log_message.emit(
+            f"Manual weld target captured at pose: "
+            f"X={laser_wp.x:.2f}, Y={laser_wp.y:.2f}"
+        )
+
+        self.progress_updated.emit(0, 1)
+        self._sm.post_event(Event.MANUAL_WELD_TRIGGER)
 
     def _tick(self) -> None:
         self._tick_camera()
@@ -446,6 +468,8 @@ class WeldController(QObject):
             self._tick_estop()
         elif state == State.ERROR:
             self._tick_error()
+        elif state == State.MANUAL_WELD:
+            self._tick_manual_weld()
 
     def _tick_camera(self) -> None:
         if not self._camera:
@@ -644,6 +668,15 @@ class WeldController(QObject):
         state = self._grbl.get_machine_state()
         if state == "Idle":
             self._current_wp_index += 1
+
+            if self._manual_weld_active:
+                self._manual_weld_active = False
+                self._weld_queue = []
+                self._current_wp_index = 0
+                self.progress_updated.emit(0, 0)
+                self._sm._do_transition(self._sm.state, Event.SEQUENCE_COMPLETE, State.MANUAL_WELD)
+                return
+
             if self._current_wp_index >= len(self._weld_queue):
                 self._sm.post_event(Event.SEQUENCE_COMPLETE)
             else:
@@ -655,3 +688,17 @@ class WeldController(QObject):
     def _tick_error(self) -> None:
         self._set_weld_relay(False)
         self._set_laser(False)
+    
+    def _tick_manual_weld(self) -> None:
+        if not self._controller_input:
+            return
+
+        data = self._controller_input.poll()
+
+        # A and X do nothing in manual weld mode.
+        # Right trigger captures current laser pose and starts one weld cycle.
+        if data["btn_rt"]:
+            self._start_manual_weld_from_current_pose()
+            return
+
+        self._jog_from_controller_data(data)
