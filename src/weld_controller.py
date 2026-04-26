@@ -446,13 +446,25 @@ class WeldController(QObject):
             self.force_updated.emit(val)
 
     def _tick_idle(self) -> None:
-        pass
+        if not self._controller_input:
+            return
+        data = self._controller_input.poll()
+        if data["btn_a"]:
+            self._sm.post_event(Event.ENTER_JOG_MODE)
 
     def _tick_manual_jog(self) -> None:
         if not self._controller_input:
             return
 
         data = self._controller_input.poll()
+
+        if data["btn_x"]:
+            self._sm.post_event(Event.EXIT_JOG_MODE)
+            return
+        if data["btn_rt"]:
+            self._sm.post_event(Event.CONFIRM_WELD_POINT)
+            return
+
         self.controller_jog_visual.emit(
             data["left"], data["right"], data["up"], data["down"]
         )

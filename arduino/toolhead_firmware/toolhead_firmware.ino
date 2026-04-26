@@ -1,78 +1,109 @@
-// Toolhead firmware: reads HX711 load cell, streams kg readings to Pi,
-// and fires the spot weld relay on command from the Pi.
-//
-// Library: "HX711" by bogde — install via Arduino Library Manager
-//
-// Wiring (matches your working test sketch):
-//   HX711 DOUT  →  Arduino D3
-//   HX711 CLK   →  Arduino D2
-//   Relay signal →  Arduino D7
-//   HX711 VCC / relay VCC  →  5V
-//   GND → GND
-//
-// ---- Calibration ----
-// Set calibration_factor by running SparkFun's calibration sketch until
-// scale.get_units() matches a known weight. Your current value (-7050)
-// is a good starting point; fine-tune if readings drift.
-//
-// Serial protocol (to Pi, 115200 baud):
-//   "READY\n"        — once on startup after tare
-//   "FSR:<kg>\n"     — force reading at SAMPLE_HZ (e.g. "FSR:1.23")
-//
-// Serial protocol (from Pi):
-//   "TARE\n"         — re-zero with probe in air
-//   "WELD_ON\n"      — close relay (Pi controls dwell duration)
-//   "WELD_OFF\n"     — open relay
+/*
+ Example using the SparkFun HX711 breakout board with a scale
+ By: Nathan Seidle
+ SparkFun Electronics
+ Date: November 19th, 2014
+ License: This code is public domain but you buy me a beer if you use this and we meet someday (Beerware license).
+
+
+ This is the calibration sketch. Use it to determine the calibration_factor that the main example uses. It also
+ outputs the zero_factor useful for projects that have a permanent mass on the scale in between power cycles.
+
+
+ Setup your scale and start the sketch WITHOUT a weight on the scale
+ Once readings are displayed place the weight on the scale
+ Press +/- or a/z to adjust the calibration_factor until the output readings match the known weight
+ Use this calibration_factor on the example sketch
+
+
+ This example assumes pounds (lbs). If you prefer kilograms, change the Serial.print(" lbs"); line to kg. The
+ calibration factor will be significantly different but it will be linearly related to lbs (1 lbs = 0.453592 kg).
+
+
+ Your calibration factor may be very positive or very negative. It all depends on the setup of your scale system
+ and the direction the sensors deflect from zero state
+ This example code uses bogde's excellent library: https://github.com/bogde/HX711
+ bogde's library is released under a GNU GENERAL PUBLIC LICENSE
+ Arduino pin 2 -> HX711 CLK
+ 3 -> DOUT
+ 5V -> VCC
+ GND -> GND
+
+
+ Most any pin on the Arduino Uno will be compatible with DOUT/CLK.
+
+
+ The HX711 board can be powered from 2.7V to 5V so the Arduino 5V power should be fine.
+
+
+*/
+
 
 #include "HX711.h"
 
-#define DOUT_PIN        3
-#define CLK_PIN         2
-#define RELAY_PIN       7
-#define SAMPLE_HZ       20       // readings per second sent to Pi
-#define AVG_SAMPLES     3        // average N readings to reduce noise (cuts ~0.6 kg jitter to ~0.2 kg)
 
-float calibration_factor = -7050;  // tune with SparkFun calibration sketch
+#define DOUT  3
+#define CLK  2
+#define pin 7
+
 
 HX711 scale;
-unsigned long lastSend = 0;
+
+
+float calibration_factor = -7050; //-7050 worked for my 440lb max scale setup
+bool relayOn = false;
+unsigned long relayStart = 0;
+
 
 void setup() {
-    Serial.begin(115200);
+  Serial.begin(9600);
 
-    pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, LOW);
 
-    scale.begin(DOUT_PIN, CLK_PIN);
-    scale.set_scale(calibration_factor);
-    scale.tare();
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, LOW); // relay OFF initially
 
-    Serial.println("READY");
+
+  Serial.println("HX711 calibration sketch");
+
+
+  scale.begin(DOUT, CLK);
+  scale.set_scale();
+  scale.tare();
+
+
+  long zero_factor = scale.read_average();
+  Serial.print("Zero factor: ");
+  Serial.println(zero_factor);
 }
 
-void loop() {
-    // Handle commands from Pi
-    if (Serial.available()) {
-        String cmd = Serial.readStringUntil('\n');
-        cmd.trim();
-        if (cmd.equalsIgnoreCase("TARE")) {
-            scale.tare();
-            Serial.println("TARED");
-        } else if (cmd.equalsIgnoreCase("WELD_ON")) {
-            digitalWrite(RELAY_PIN, HIGH);
-        } else if (cmd.equalsIgnoreCase("WELD_OFF")) {
-            digitalWrite(RELAY_PIN, LOW);
-        }
-    }
 
-    // Stream force readings to Pi
-    unsigned long now = millis();
-    if (now - lastSend >= (1000UL / SAMPLE_HZ)) {
-        lastSend = now;
-        if (scale.is_ready()) {
-            float kg = scale.get_units(AVG_SAMPLES) / 2.2f;
-            Serial.print("FSR:");
-            Serial.println(kg, 2);  // 2 decimal places, e.g. "FSR:1.23"
-        }
-    }
+void loop() {
+
+
+  scale.set_scale(calibration_factor);
+
+
+  float weight = scale.get_units() / 2.2; // remove /2.2 if calibrated in kg
+
+
+  Serial.print("Reading: ");
+  Serial.print(weight, 1);
+  Serial.print(" kg");
+  Serial.println();
+
+
+  // Relay trigger
+  if (weight > 5.0 && !relayOn) {
+    digitalWrite(pin, HIGH);
+    relayOn = true;
+    relayStart = millis();
+  }
+
+
+  // Turn OFF after 10 ms
+  if (relayOn && (millis() - relayStart >= 10)) {
+    digitalWrite(pin, LOW);
+    relayOn = false;
+  }
+
 }

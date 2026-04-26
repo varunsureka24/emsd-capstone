@@ -298,6 +298,9 @@ class SpotWelderGUI(QMainWindow):
         self.controller.post_event(Event.START_WELD_SEQUENCE)
 
     def _on_state_changed(self, state_name: str):
+        if state_name == "MANUAL_JOG":
+            self.tabs.setCurrentWidget(self.waypoints_tab)
+
         if state_name == "IDLE" and not self._travel_height_prompted:
             self._travel_height_prompted = True
             QTimer.singleShot(0, self._prompt_travel_height_startup)

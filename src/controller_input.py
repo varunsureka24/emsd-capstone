@@ -4,6 +4,9 @@ import pygame
 class ControllerInput:
     def __init__(self):
         self.joystick = None
+        self._prev_a = False
+        self._prev_x = False
+        self._prev_rt = False
 
     def connect(self):
         pygame.init()
@@ -19,6 +22,11 @@ class ControllerInput:
         if self.joystick is None:
             return "No controller"
         return self.joystick.get_name()
+
+    BTN_A = 0
+    BTN_X = 2
+    RT_AXIS = 5         # Right trigger axis (Xbox One on Windows via SDL2)
+    RT_THRESHOLD = 0.5  # Axis value >= this counts as pressed
 
     STICK_DEADZONE = 0.25
     # Minor axis must be at least this fraction of the major axis to allow diagonal movement.
@@ -37,6 +45,9 @@ class ControllerInput:
                 "hat_y": 0,
                 "stick_x": 0.0,
                 "stick_y": 0.0,
+                "btn_a": False,
+                "btn_x": False,
+                "btn_rt": False,
             }
 
         pygame.event.pump()
@@ -55,6 +66,18 @@ class ControllerInput:
             elif abs(stick_x) < abs(stick_y) * self.DIAGONAL_THRESHOLD:
                 stick_x = 0.0
 
+        cur_a  = bool(self.joystick.get_button(self.BTN_A))
+        cur_x  = bool(self.joystick.get_button(self.BTN_X))
+        cur_rt = self.joystick.get_axis(self.RT_AXIS) >= self.RT_THRESHOLD
+
+        btn_a  = cur_a  and not self._prev_a
+        btn_x  = cur_x  and not self._prev_x
+        btn_rt = cur_rt and not self._prev_rt
+
+        self._prev_a  = cur_a
+        self._prev_x  = cur_x
+        self._prev_rt = cur_rt
+
         return {
             "left": hat_x < 0,
             "right": hat_x > 0,
@@ -64,6 +87,9 @@ class ControllerInput:
             "hat_y": hat_y,
             "stick_x": stick_x,
             "stick_y": stick_y,
+            "btn_a": btn_a,
+            "btn_x": btn_x,
+            "btn_rt": btn_rt,
         }
 
     def close(self):
