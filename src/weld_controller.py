@@ -60,7 +60,7 @@ Z_TOUCH_FEED = 1000
 Z_MAX_DESCENT = 8.0
 Z_STEP_INTERVAL = 0.10
 
-WELD_DWELL_TIME = 1.0
+WELD_DWELL_TIME = 0.05  # seconds — Arduino self-terminates relay after 10ms; this just ensures it's done before Z raises
 
 
 class WeldController(QObject):
@@ -606,8 +606,7 @@ class WeldController(QObject):
             return
 
         if time.time() - self._weld_start_time >= WELD_DWELL_TIME:
-            self._set_weld_relay(False)
-            self.log_message.emit("Weld relay OFF")
+            self.log_message.emit("Weld complete")
             self._sm.post_event(Event.WELD_COMPLETE)
 
     def _tick_z_raising(self) -> None:
