@@ -89,7 +89,7 @@ class ControllerInput:
             "stick_y": stick_y,
             "btn_a": btn_a,
             "btn_x": btn_x,
-            "btn_rt": btn_rt,
+            "btn_rt": btn_rt, # right trigger
         }
 
     def close(self):

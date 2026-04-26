@@ -60,8 +60,9 @@ Z_TOUCH_FEED = 1000
 Z_MAX_DESCENT = 8.0
 Z_STEP_INTERVAL = 0.10
 
-WELD_DWELL_TIME = 0.05  # seconds — Arduino self-terminates relay after 10ms; this just ensures it's done before Z raises
+WELD_DWELL_TIME = 0.05  # seconds — Arduino self-terminates relay after10ms; this just ensures it's done before Z raises
 
+X_OFFSET = -7.5
 
 class WeldController(QObject):
     state_changed = pyqtSignal(str)
@@ -370,12 +371,13 @@ class WeldController(QObject):
 
         if self._grbl:
             self._grbl.move_to(z=self._travel_height, feed=Z_FEED_RATE)
-            self._grbl.move_to(x=wp.x, y=wp.y, feed=XY_FEED_RATE)
+            self._grbl.move_to(x=wp.x + X_OFFSET, y=wp.y, feed=XY_FEED_RATE)
             self._move_just_started = True
 
         self.log_message.emit(
             f"Moving to waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}: "
-            f"X={wp.x:.2f}, Y={wp.y:.2f}"
+            f"Laser X={wp.x:.2f}, Y={wp.y:.2f} -> "
+            f"Toolhead X={wp.x + X_OFFSET:.2f}, Y={wp.y:.2f}"
         )
 
     def _on_enter_z_lowering(self) -> None:
