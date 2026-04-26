@@ -53,6 +53,8 @@ class SpotWelderGUI(QMainWindow):
         self.tabs.addTab(self.operations_tab, "Operations")
         self.tabs.addTab(self.waypoints_tab, "Waypoints")
 
+        self._enable_set_travel_height = False # Set to True when limit switches are added and himing is enabled
+
         self.build_operations_tab()
         self.build_waypoints_tab()
 
@@ -135,6 +137,7 @@ class SpotWelderGUI(QMainWindow):
         controls_layout.addWidget(self.home_btn, 2, 0, 1, 2)
         self.set_travel_height_btn = QPushButton("Set Travel Height…")
         controls_layout.addWidget(self.set_travel_height_btn, 3, 0, 1, 2)
+        self.set_travel_height_btn.setVisible(self._enable_set_travel_height)
         controls_group.setLayout(controls_layout)
 
         self.estop_btn.setStyleSheet(
@@ -302,7 +305,7 @@ class SpotWelderGUI(QMainWindow):
         if state_name == "MANUAL_JOG":
             self.tabs.setCurrentWidget(self.waypoints_tab)
 
-        if state_name == "IDLE" and not self._travel_height_prompted:
+        if state_name == "IDLE" and not self._travel_height_prompted and self._enable_set_travel_height:
             self._travel_height_prompted = True
             QTimer.singleShot(0, self._prompt_travel_height_startup)
 
@@ -317,7 +320,8 @@ class SpotWelderGUI(QMainWindow):
 
         self.start_weld_seq_btn.setEnabled(state_name == "IDLE")
         self.home_btn.setEnabled(state_name in ("IDLE", "MANUAL_JOG"))
-        self.set_travel_height_btn.setEnabled(state_name in ("IDLE", "MANUAL_JOG"))
+        if self._enable_set_travel_height:
+            self.set_travel_height_btn.setEnabled(state_name in ("IDLE", "MANUAL_JOG"))
         self.enter_jog_btn.setEnabled(state_name == "IDLE")
         self.exit_jog_btn.setEnabled(state_name == "MANUAL_JOG")
         self.capture_btn.setEnabled(state_name in ("MANUAL_JOG", "CAMERA_LASER_TARGETING"))
