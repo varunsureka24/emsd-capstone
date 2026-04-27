@@ -22,6 +22,10 @@ _CONTROLLER_IMG = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "images", "Controller Layout.png"
 )
 
+_MANUAL_CONTROLLER_IMG = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "images", "manual_controller.png"
+)
+
 _STATE_DISPLAY = {
     "SYSTEM_INIT":            ("Initializing",   "System"),
     "IDLE":                   ("Idle",           "Manual"),
@@ -318,7 +322,7 @@ class SpotWelderGUI(QMainWindow):
 
         controller_img_group = QGroupBox("Controller Layout")
         controller_img_layout = QVBoxLayout()
-        controller_img_layout.addWidget(self._controller_image_label())
+        controller_img_layout.addWidget(self._manual_controller_image_label())
         controller_img_group.setLayout(controller_img_layout)
 
         left_panel.addWidget(pose_group)
@@ -539,6 +543,20 @@ class SpotWelderGUI(QMainWindow):
             lbl.setPixmap(pixmap.scaled(560, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             lbl.setText("Controller Layout\n(image not found)")
+        return lbl
+    
+    def _manual_controller_image_label(self) -> QLabel:
+        lbl = QLabel()
+        lbl.setAlignment(Qt.AlignCenter)
+
+        pixmap = QPixmap(_MANUAL_CONTROLLER_IMG)
+        if not pixmap.isNull():
+            lbl.setPixmap(
+                pixmap.scaled(560, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        else:
+            lbl.setText("Manual Controller Layout\n(image not found)")
+
         return lbl
 
     def _set_jog_button_highlights(self, left=False, right=False, up=False, down=False):
