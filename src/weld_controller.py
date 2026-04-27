@@ -780,19 +780,86 @@ class WeldController(QObject):
         self._set_weld_relay(False)
         self._set_laser(False)
     
+    # def _tick_manual_weld(self) -> None:
+    #     if not self._controller_input:
+    #         return
+
+    #     data = self._controller_input.poll()
+
+    #     # A and X do nothing in manual weld mode.
+    #     # Right trigger captures current laser pose and starts one weld cycle.
+    #     if data["btn_rt"]:
+    #         self._start_manual_weld_from_current_pose()
+    #         return
+
+        # self._jog_from_controller_data(data)
+    
     def _tick_manual_weld(self) -> None:
         if not self._controller_input:
             return
 
         data = self._controller_input.poll()
 
-        # A and X do nothing in manual weld mode.
-        # Right trigger captures current laser pose and starts one weld cycle.
+        # X button exits manual weld mode
+        if data["btn_x"]:
+            self._sm.post_event(Event.EXIT_MANUAL_WELD)
+            return
+
+        # Right trigger starts the manual weld sequence
         if data["btn_rt"]:
             self._start_manual_weld_from_current_pose()
             return
 
-        self._jog_from_controller_data(data)
+        # Left thumbstick controls X/Y
+        # D-pad up/down controls Z
+        self._jog_manual_weld_from_controller(data)
+    
+    def _jog_manual_weld_from_controller(self, data: dict) -> None:
+        now = time.time()
+
+        dx = 0.0
+        dy = 0.0
+        dz = 0.0
+
+        # left thumbstick = X/Y
+        using_stick = data["stick_x"] != 0.0 or data["stick_y"] != 0.0
+
+        if using_stick:
+            if now - self._last_stick_jog_time < STICK_COMMAND_INTERVAL:
+                return
+
+            stick_mag = min((data["stick_x"] ** 2 + data["stick_y"] ** 2) ** 0.5, 1.0)
+
+            feed = int(
+                STICK_MIN_FEED
+                + (STICK_MAX_FEED - STICK_MIN_FEED) * (stick_mag ** STICK_CURVE)
+            )
+
+            step = (feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
+
+            dx = step * (data["stick_x"] / stick_mag)
+            dy = step * (data["stick_y"] / stick_mag)
+
+            self._last_stick_jog_time = now
+
+        # d-pad up/down = Z
+        if data["hat_y"] != 0:
+            if now - self._last_jog_time < COMMAND_INTERVAL:
+                return
+
+            dz = 0.5 * data["hat_y"]   # up = Z+, down = Z-
+            feed = Z_FEED_RATE
+
+            self._last_jog_time = now
+
+        if dx != 0.0 or dy != 0.0 or dz != 0.0:
+            if self._grbl:
+                self._grbl.jog(dx=dx, dy=dy, dz=dz, feed=feed)
+
+                pos = self._grbl.get_position()
+                if pos is not None:
+                    self._sim_x, self._sim_y, self._sim_z = pos
+                    self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
     def _tick_set_travel_height(self) -> None:
         if not self._controller_input:
