@@ -7,6 +7,7 @@ class GrblController:
         self.port = port
         self.baudrate = baudrate
         self.ser = None
+        self._last_wco = (0.0, 0.0, 0.0)
 
     def connect(self):
         self.ser = serial.Serial(self.port, self.baudrate, timeout=1, write_timeout=1)
@@ -67,20 +68,28 @@ class GrblController:
         if not line:
             return None
 
-        coords = None
-        if "WPos:" in line:
-            coords = line.split("WPos:")[1].split("|")[0]
-        elif "MPos:" in line:
-            coords = line.split("MPos:")[1].split("|")[0]
-
-        if not coords:
-            return None
-
         try:
-            x_str, y_str, z_str = coords.split(",")
-            return float(x_str), float(y_str), float(z_str)
+            if "MPos:" in line:
+                coords = line.split("MPos:")[1].split("|")[0].rstrip(">")
+                x, y, z = [float(v) for v in coords.split(",")]
+                if "WCO:" in line:
+                    wco = line.split("WCO:")[1].split("|")[0].rstrip(">")
+                    ox, oy, oz = [float(v) for v in wco.split(",")]
+                    self._last_wco = (ox, oy, oz)
+                ox, oy, oz = self._last_wco
+                return x - ox, y - oy, z - oz
+
+            if "WPos:" in line:
+                wpos = line.split("WPos:")[1].split("|")[0].rstrip(">")
+                wx, wy, wz = [float(v) for v in wpos.split(",")]
+                if "WCO:" in line:
+                    wco = line.split("WCO:")[1].split("|")[0].rstrip(">")
+                    self._last_wco = tuple(float(v) for v in wco.split(","))
+                return wx, wy, wz
         except Exception:
             return None
+
+        return None
 
     def get_machine_state(self):
         line = self.query_status_line()
@@ -129,7 +138,7 @@ class GrblController:
         return lines
 
     def move_to(self, x=None, y=None, z=None, feed=3000.0):
-        parts = ["G53", "G21", "G1"]
+        parts = ["G21", "G1"]
         if x is not None:
             parts.append(f"X{x:.3f}")
         if y is not None:

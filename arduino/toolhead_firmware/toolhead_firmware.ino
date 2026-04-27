@@ -4,8 +4,8 @@
 #define CLK   2
 #define RELAY_PIN 7
 
-#define AVG_SAMPLES 3
-#define WELD_PULSE_MS 10
+#define AVG_SAMPLES 1
+#define WELD_PULSE_MS 100
 
 float calibration_factor = -7050;
 
@@ -15,7 +15,7 @@ unsigned long relayStart = 0;
 unsigned long lastSend = 0;
 
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(9600);
 
     pinMode(RELAY_PIN, OUTPUT);
     digitalWrite(RELAY_PIN, LOW);
@@ -48,12 +48,11 @@ void loop() {
         }
     }
 
-    // Stream force readings to Pi at ~20 Hz
-    if (millis() - lastSend >= 50) {
+    // Stream force readings to Pi at ~10 Hz (matches HX711 hardware output rate)
+    if (millis() - lastSend >= 100) {
         lastSend = millis();
         if (scale.is_ready()) {
             float kg = scale.get_units(AVG_SAMPLES) / 2.2f;
-            Serial.print("FSR:");
             Serial.println(kg, 2);
         }
     }

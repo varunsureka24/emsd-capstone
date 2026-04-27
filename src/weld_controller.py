@@ -19,11 +19,11 @@ except Exception:
     LED = None
 
 
-DEFAULT_SERIAL_PORT = "/dev/ttyACM0"
+DEFAULT_SERIAL_PORT = "COM3"
 DEFAULT_BAUD = 115200
 
-FORCE_SENSOR_PORT = "/dev/ttyUSB0"   # verify with: ls /dev/ttyUSB*
-FORCE_SENSOR_BAUD = 115200
+FORCE_SENSOR_PORT = "COM5"
+FORCE_SENSOR_BAUD = 9600
 
 CAMERA_INDEX = 0
 CAMERA_WIDTH = 640
@@ -52,15 +52,15 @@ STICK_CURVE = 2.0               # response curve exponent: 1=linear, 2=quadratic
 # With probe in air the reading will vary ~0.0–0.6 kg due to HX711 noise.
 # Tune CONTACT_THRESHOLD after physical testing; it must sit comfortably
 # above the at-rest noise floor.
-CONTACT_THRESHOLD = 2.0        # kg — light contact detected, stop Z
+CONTACT_THRESHOLD = 1.25       # kg — light contact detected, stop Z
 HARD_CONTACT_THRESHOLD = 8.0   # kg — dangerous overload, emergency stop
-FORCE_DEBOUNCE_COUNT = 3       # consecutive readings required before acting
+FORCE_DEBOUNCE_COUNT = 2       # consecutive readings required before acting
 Z_TOUCH_STEP = 0.2
 Z_TOUCH_FEED = 1000
-Z_MAX_DESCENT = 8.0
-Z_STEP_INTERVAL = 0.10
+Z_MAX_DESCENT = 20.0
+Z_STEP_INTERVAL = 0.12
 
-WELD_DWELL_TIME = 0.05  # seconds — Arduino self-terminates relay after10ms; this just ensures it's done before Z raises
+WELD_DWELL_TIME = 0.100  # seconds — ensures relay fires for full 100 ms before Z raises
 
 X_OFFSET = -7.5
 
@@ -163,9 +163,12 @@ class WeldController(QObject):
             self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
         except Exception as exc:
-            log.error("Init failed: %s", exc)
+            msg = str(exc)
+            if "PermissionError" in msg or "Access is denied" in msg:
+                msg += " — close Arduino IDE Serial Monitor or any other program using this port, then restart."
+            log.error("Init failed: %s", msg)
             self._sm.post_event(Event.INIT_FAILED)
-            self.log_message.emit(f"Init failed: {exc}")
+            self.log_message.emit(f"Init failed: {msg}")
             return
 
         self._timer.start(20)
@@ -231,15 +234,10 @@ class WeldController(QObject):
         self.log_message.emit("Homing... ($H)")
         resp = self._grbl.home()
         self.log_message.emit(f"GRBL homing response: {resp}")
-        pos = self._grbl.get_position()
-        if pos is not None:
-            self._sim_x, self._sim_y, self._sim_z = pos
-            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
-            self.log_message.emit(
-                f"Position after home: X={self._sim_x:.2f}, Y={self._sim_y:.2f}, Z={self._sim_z:.2f}"
-            )
-        else:
-            self.log_message.emit("Warning: could not read position after homing")
+        self._grbl.send_command("G10 L20 P1 X0 Y0 Z0")
+        self._sim_x, self._sim_y, self._sim_z = 0.0, 0.0, 0.0
+        self.position_updated.emit(0.0, 0.0, 0.0)
+        self.log_message.emit("Position after home: X=0.00, Y=0.00, Z=0.00")
 
     def prepare_weld_queue(self) -> None:
         self._weld_queue = list(self._waypoints.get_all())
@@ -627,7 +625,7 @@ class WeldController(QObject):
 
             if self._contact_counter >= FORCE_DEBOUNCE_COUNT:
                 self.log_message.emit("Contact confirmed — weld about to fire")
-                self._grbl.feed_hold()
+                self._grbl.jog_cancel()
                 self._sm.post_event(Event.Z_LOWER_DONE)
                 return
 

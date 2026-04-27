@@ -63,12 +63,12 @@ class SpotWelderGUI(QMainWindow):
         self.build_manual_weld_tab()
 
         self.controller = WeldController(
-            enable_grbl=False,
-            enable_homing=False,
-            enable_force_sensor=False,
-            enable_controller=False,
+            enable_grbl=True,
+            enable_homing=True,
+            enable_force_sensor=True,
+            enable_controller=True,
             enable_camera=False,
-            enable_laser=False,
+            enable_laser=True,
             enable_weld_relay=False,
         )
         self._travel_height_prompted = False

@@ -5,7 +5,7 @@ import serial
 class ForceSensorReader:
     def __init__(self, port="/dev/ttyUSB0", baudrate=115200):
         self.port = port
-        self.baudrate = baudrate
+        self.baudrate = 9600
         self.ser = None
         self.latest_value = None
 
@@ -33,6 +33,8 @@ class ForceSensorReader:
                     self.latest_value = float(line)
                 except ValueError:
                     pass
+
+        return self.latest_value
 
     def send_command(self, cmd: str) -> None:
         if self.ser and self.ser.is_open:
