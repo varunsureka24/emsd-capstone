@@ -160,3 +160,6 @@ class GrblController:
         if self.ser and self.ser.is_open:
             self.ser.close()
             self.ser = None
+    
+    def set_current_position_as_origin(self):
+        return self.send_command("G10 L20 P1 X0 Y0 Z0")

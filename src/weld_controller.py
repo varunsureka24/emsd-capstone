@@ -136,6 +136,7 @@ class WeldController(QObject):
         self._timer.timeout.connect(self._tick)
 
         self._manual_weld_active = False
+        self._origin_set = False
 
     def start(self) -> None:
         log.info("WeldController starting...")
@@ -442,6 +443,64 @@ class WeldController(QObject):
 
         self.progress_updated.emit(0, 1)
         self._sm.post_event(Event.MANUAL_WELD_TRIGGER)
+    
+    def _jog_calibration_from_controller_data(self, data) -> None:
+        now = time.time()
+
+        using_stick = data["stick_x"] != 0.0 or data["stick_y"] != 0.0
+        using_z = data["up"] or data["down"]
+
+        if not using_stick and not using_z:
+            if self._grbl:
+                self._grbl.jog_cancel()
+            return
+
+        if now - self._last_stick_jog_time < STICK_COMMAND_INTERVAL:
+            return
+
+        dx = 0.0
+        dy = 0.0
+        dz = 0.0
+        feed = JOG_FEED
+
+        if using_stick:
+            stick_mag = min((data["stick_x"] ** 2 + data["stick_y"] ** 2) ** 0.5, 1.0)
+            feed = int(
+                STICK_MIN_FEED
+                + (STICK_MAX_FEED - STICK_MIN_FEED) * (stick_mag ** STICK_CURVE)
+            )
+
+            step = (feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
+
+            dx = step * (data["stick_x"] / stick_mag)
+            dy = step * (data["stick_y"] / stick_mag)
+
+        if using_z:
+            z_feed = Z_FEED_RATE
+            z_step = (z_feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
+
+            if data["up"]:
+                dz = z_step
+            elif data["down"]:
+                dz = -z_step
+
+            if not using_stick:
+                feed = z_feed
+
+        if self._grbl:
+            self._grbl.jog(dx=dx, dy=dy, dz=dz, feed=feed)
+
+            if now - self._last_stick_pos_sync_time >= 0.2:
+                pos = self._grbl.get_position()
+                if pos is not None:
+                    self._sim_x, self._sim_y, self._sim_z = pos
+                    self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+                self._last_stick_pos_sync_time = now
+
+        self._last_stick_jog_time = now
+
+    def is_origin_set(self):
+        return self._origin_set
 
     def _tick(self) -> None:
         self._tick_camera()
@@ -470,6 +529,10 @@ class WeldController(QObject):
             self._tick_error()
         elif state == State.MANUAL_WELD:
             self._tick_manual_weld()
+        elif state == State.MANUAL_CALIBRATION:
+            self._tick_manual_calibration()
+        elif state == State.SET_TRAVEL_HEIGHT:
+            self._tick_set_travel_height()
 
     def _tick_camera(self) -> None:
         if not self._camera:
@@ -702,3 +765,80 @@ class WeldController(QObject):
             return
 
         self._jog_from_controller_data(data)
+    
+    def _tick_manual_calibration(self) -> None:
+        if not self._controller_input:
+            return
+
+        data = self._controller_input.poll()
+
+        # X button exits calibration
+        if data["btn_x"]:
+            self._sm.post_event(Event.EXIT_MANUAL_CALIBRATION)
+            return
+
+        # Right trigger sets current X/Y/Z as origin
+        if data["btn_rt"]:
+            if self._grbl:
+                self._grbl.set_current_position_as_origin()
+
+            self._origin_set = True
+            self.log_message.emit("ORIGIN_SET")
+            self._sm.post_event(Event.EXIT_MANUAL_CALIBRATION)
+            return
+    
+    def _tick_set_travel_height(self) -> None:
+        if not self._controller_input:
+            return
+
+        data = self._controller_input.poll()
+
+        # X cancels
+        if data["btn_x"]:
+            self._sm.post_event(Event.EXIT_SET_TRAVEL_HEIGHT)
+            return
+
+        # RT saves current Z as travel height
+        if data["btn_rt"]:
+            pos = self._grbl.get_position() if self._grbl else None
+            if pos is not None:
+                self._sim_x, self._sim_y, self._sim_z = pos
+                self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+
+            self.set_travel_height(self._sim_z)
+            self.log_message.emit("TRAVEL_HEIGHT_SET")
+            self._sm.post_event(Event.EXIT_SET_TRAVEL_HEIGHT)
+            return
+
+        # D-pad moves Z continuously
+        now = time.time()
+        using_z = data["up"] or data["down"]
+
+        if not using_z:
+            if self._grbl:
+                self._grbl.jog_cancel()
+            return
+
+        if now - self._last_stick_jog_time < STICK_COMMAND_INTERVAL:
+            return
+
+        z_feed = Z_FEED_RATE
+        z_step = (z_feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
+
+        dz = 0.0
+        if data["up"]:
+            dz = z_step
+        elif data["down"]:
+            dz = -z_step
+
+        if self._grbl:
+            self._grbl.jog(dz=dz, feed=z_feed)
+
+            if now - self._last_stick_pos_sync_time >= 0.2:
+                pos = self._grbl.get_position()
+                if pos is not None:
+                    self._sim_x, self._sim_y, self._sim_z = pos
+                    self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+                self._last_stick_pos_sync_time = now
+
+        self._last_stick_jog_time = now

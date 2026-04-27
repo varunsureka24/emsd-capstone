@@ -44,6 +44,9 @@ class State(Enum):
     Z_RAISING               = auto()
 
     MANUAL_WELD             = auto()
+    MANUAL_CALIBRATION      = auto()
+
+    SET_TRAVEL_HEIGHT       = auto()
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +89,14 @@ class Event(Enum):
     EXIT_MANUAL_WELD        = auto()
     MANUAL_WELD_TRIGGER     = auto()
 
+    # Manual Homing
+    ENTER_MANUAL_CALIBRATION = auto()
+    EXIT_MANUAL_CALIBRATION = auto()
+
+    # Set working Z height
+    ENTER_SET_TRAVEL_HEIGHT = auto()
+    EXIT_SET_TRAVEL_HEIGHT = auto()
+
 
 # ---------------------------------------------------------------------------
 # Transition table
@@ -125,6 +136,13 @@ TRANSITIONS: dict[tuple[State, Event], State] = {
     # ── Manual weld ───────────────────────────────────────────────
     (State.IDLE, Event.ENTER_MANUAL_WELD): State.MANUAL_WELD,
     (State.MANUAL_WELD, Event.EXIT_MANUAL_WELD): State.IDLE,
+
+     # ── Manual homing ───────────────────────────────────────────────
+    (State.IDLE, Event.ENTER_MANUAL_CALIBRATION): State.MANUAL_CALIBRATION, 
+    (State.MANUAL_CALIBRATION, Event.EXIT_MANUAL_CALIBRATION): State.IDLE,
+
+    (State.IDLE, Event.ENTER_SET_TRAVEL_HEIGHT): State.SET_TRAVEL_HEIGHT,
+    (State.SET_TRAVEL_HEIGHT, Event.EXIT_SET_TRAVEL_HEIGHT): State.IDLE,
 
 }
 

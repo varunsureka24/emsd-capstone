@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import QMessageBox
 
 from weld_controller import WeldController
 from state_machine import Event
@@ -39,7 +40,8 @@ _STATE_DISPLAY = {
     "Z_RAISING":              ("Z Raise",        "Auto"),
     "EMERGENCY_STOP":         ("E-STOP",         "E-Stop"),
     "ERROR":                  ("Error",          "Error"),
-    "MANUAL_WELD": ("Manual Weld", "Manual"),
+    "MANUAL_WELD":            ("Manual Weld",   "Manual"),
+    "MANUAL_CALIBRATION":     ("Manual Calibration", "Manual"),
 }
 
 
@@ -48,6 +50,9 @@ class SpotWelderGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("Spot Welder Control GUI")
         self.resize(1200, 800)
+        self._manual_calibration_prompted = False
+        self.calibration_dialog = None
+        self.calibration_status_label = None
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -113,6 +118,8 @@ class SpotWelderGUI(QMainWindow):
         self.laser_label = QLabel("Laser: OFF")
         self.force_label = QLabel("Force Sensor: --")
         self.travel_height_label = QLabel("Travel Z: 25.0 mm")
+        self.origin_label = QLabel("Origin: NOT SET")
+        status_layout.addWidget(self.origin_label)
 
         for lbl in (
             self.state_label,
@@ -126,6 +133,7 @@ class SpotWelderGUI(QMainWindow):
             self.travel_height_label,
         ):
             status_layout.addWidget(lbl)
+
 
         status_group.setLayout(status_layout)
 
@@ -157,6 +165,7 @@ class SpotWelderGUI(QMainWindow):
 
         right_panel.addWidget(status_group)
         right_panel.addWidget(controls_group)
+        # right_panel.addWidget(self.calib_group)
         right_panel.addWidget(controller_img_group)
 
         top_layout.addWidget(camera_group, 2)
@@ -373,7 +382,7 @@ class SpotWelderGUI(QMainWindow):
         c.position_updated.connect(self._on_position_updated)
         c.waypoints_updated.connect(self._refresh_waypoint_table)
         c.progress_updated.connect(self._on_progress_updated)
-        c.log_message.connect(self.log_box.append)
+        c.log_message.connect(self._on_log_message)
 
         # New hardware/status signals
         c.controller_jog_visual.connect(self._set_jog_button_highlights)
@@ -395,14 +404,15 @@ class SpotWelderGUI(QMainWindow):
         self.delete_btn.clicked.connect(self._on_delete_waypoint)
         self.clear_btn.clicked.connect(c.clear_waypoints)
 
-        self.set_travel_height_btn.clicked.connect(self._on_set_travel_height)
 
         # Manual Weld entry/exit
         self.enter_manual_weld_btn.clicked.connect(
             lambda: c.post_event(Event.ENTER_MANUAL_WELD))
         self.exit_manual_weld_btn.clicked.connect(
-            lambda: c.post_event(Event.EXIT_MANUAL_WELD)
-)
+            lambda: c.post_event(Event.EXIT_MANUAL_WELD))
+        
+        self.set_travel_height_btn.clicked.connect(self._prompt_travel_height_startup)
+    
 
     # ------------------------------------------------------------------
     # Slots
@@ -415,9 +425,21 @@ class SpotWelderGUI(QMainWindow):
         if state_name == "MANUAL_JOG":
             self.tabs.setCurrentWidget(self.waypoints_tab)
 
-        if state_name == "IDLE" and not self._travel_height_prompted:
+        if state_name == "IDLE" and not self._manual_calibration_prompted:
+            self._manual_calibration_prompted = True
+
+            QTimer.singleShot(0, self._show_manual_calibration_startup)
+            return  
+
+        if (
+            state_name == "IDLE"
+            and self._manual_calibration_prompted
+            and not self._travel_height_prompted
+        ):
             self._travel_height_prompted = True
+
             QTimer.singleShot(0, self._prompt_travel_height_startup)
+        
 
         display, mode = _STATE_DISPLAY.get(state_name, (state_name, "—"))
         self.state_label.setText(f"State: {display}")
@@ -440,6 +462,41 @@ class SpotWelderGUI(QMainWindow):
         
         if state_name == "MANUAL_WELD":
             self.tabs.setCurrentWidget(self.manual_weld_tab)
+        
+        if state_name == "MANUAL_CALIBRATION":
+            if self.calibration_dialog is not None:
+                self.calibration_dialog.show()
+                self.calibration_dialog.raise_()
+
+        elif state_name == "IDLE" and self._manual_calibration_prompted:
+            if self.calibration_dialog is not None:
+                self.calibration_dialog.close()
+                self.calibration_dialog = None
+                self.calibration_status_label = None
+
+        if self.controller.is_origin_set():
+            self.origin_label.setText("Origin: SET")
+            self.origin_label.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            self.origin_label.setText("Origin: NOT SET")
+            self.origin_label.setStyleSheet("")
+
+        # --- CLOSE CALIBRATION POPUP ---
+        if state_name != "MANUAL_CALIBRATION":
+            if self.calibration_dialog is not None:
+                self.calibration_dialog.close()
+                self.calibration_dialog = None
+                self.calibration_status_label = None
+
+
+        # --- CLOSE TRAVEL HEIGHT POPUP ---
+        if state_name != "SET_TRAVEL_HEIGHT":
+            if hasattr(self, "travel_height_dialog") and self.travel_height_dialog is not None:
+                self.travel_height_dialog.close()
+                self.travel_height_dialog = None
+                self.travel_height_status_label = None
+            
+                
 
     def _on_position_updated(self, x: float, y: float, z: float):
         self.pose_x_label.setText(f"Pose X: {x:.2f}")
@@ -467,58 +524,47 @@ class SpotWelderGUI(QMainWindow):
     def _on_force_updated(self, value: int):
         self.force_label.setText(f"Force Sensor: {value}")
 
-    # ------------------------------------------------------------------
-    # Travel-height dialog
-    # ------------------------------------------------------------------
-    _TRAVEL_HEIGHT_MIN = 5.0
-    _TRAVEL_HEIGHT_MAX = 80.0
-    _TRAVEL_HEIGHT_DEFAULT = 25.0
-
-    def _ask_travel_height(self, current: float) -> float:
+   
+    def _prompt_travel_height_startup(self):
         dlg = QDialog(self)
-        dlg.setWindowTitle("Set Safe Z Travel Height")
-        dlg.setModal(True)
+        dlg.setWindowTitle("Set Z Travel Height")
+        dlg.setModal(False)
 
-        spin = QDoubleSpinBox()
-        spin.setRange(self._TRAVEL_HEIGHT_MIN, self._TRAVEL_HEIGHT_MAX)
-        spin.setDecimals(1)
-        spin.setSingleStep(1.0)
-        spin.setSuffix(" mm")
-        spin.setValue(current)
-
-        note = QLabel(
-            "Enter the height Z raises to before XY moves.\n"
-            "Set this 25–50 mm (1–2 inches) above your weld surface.\n"
-            f"Range: {self._TRAVEL_HEIGHT_MIN:.0f} – {self._TRAVEL_HEIGHT_MAX:.0f} mm"
-        )
-        note.setWordWrap(True)
-
-        buttons = QDialogButtonBox()
-        ok_btn = buttons.addButton("Set Height", QDialogButtonBox.AcceptRole)
-        buttons.addButton("Use Default (25 mm)", QDialogButtonBox.RejectRole)
-        ok_btn.setDefault(True)
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-
-        form = QFormLayout()
-        form.addRow("Travel height:", spin)
         layout = QVBoxLayout()
-        layout.addWidget(note)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+
+        label = QLabel(
+            "Set Safe Z Travel Height\n\n"
+            "Use D-pad up/down to move Z.\n"
+            "Move the toolhead to the desired safe travel height above the weld surface.\n\n"
+            "Right trigger: save current Z as travel height\n"
+            "X button: cancel"
+        )
+        label.setWordWrap(True)
+
+        self.travel_height_status_label = QLabel("Travel height not set yet")
+        self.travel_height_status_label.setAlignment(Qt.AlignCenter)
+        self.travel_height_status_label.setStyleSheet("color: gray; font-weight: bold;")
+
+        start_btn = QPushButton("Start Setting Travel Height")
+        exit_btn = QPushButton("Exit")
+
+        start_btn.clicked.connect(
+            lambda: self.controller.post_event(Event.ENTER_SET_TRAVEL_HEIGHT)
+        )
+        exit_btn.clicked.connect(
+            lambda: self.controller.post_event(Event.EXIT_SET_TRAVEL_HEIGHT)
+        )
+
+        layout.addWidget(label)
+        layout.addWidget(self.travel_height_status_label)
+        layout.addWidget(start_btn)
+        layout.addWidget(exit_btn)
+
         dlg.setLayout(layout)
 
-        return spin.value() if dlg.exec_() == QDialog.Accepted else self._TRAVEL_HEIGHT_DEFAULT
+        self.travel_height_dialog = dlg
+        dlg.show()
 
-    def _prompt_travel_height_startup(self):
-        height = self._ask_travel_height(current=self._TRAVEL_HEIGHT_DEFAULT)
-        self.controller.set_travel_height(height)
-        self.travel_height_label.setText(f"Travel Z: {height:.1f} mm")
-
-    def _on_set_travel_height(self):
-        height = self._ask_travel_height(current=self.controller.travel_height)
-        self.controller.set_travel_height(height)
-        self.travel_height_label.setText(f"Travel Z: {height:.1f} mm")
 
     def _refresh_waypoint_table(self, wp_list: list):
         self.wp_table.setRowCount(len(wp_list))
@@ -595,7 +641,68 @@ class SpotWelderGUI(QMainWindow):
                     Qt.SmoothTransformation,
                 )
             )
+    
+    def _show_manual_calibration_startup(self):
+        if self.calibration_dialog is not None:
+            self.calibration_dialog.show()
+            self.calibration_dialog.raise_()
+            return
 
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Manual Calibration")
+        dlg.setModal(False)
+
+        layout = QVBoxLayout()
+
+        instructions = QLabel(
+            "Manual Calibration\n\n"
+            "Use the controller to move the machine:\n\n"
+            "Left thumbstick: move X/Y\n"
+            "D-pad up/down: move Z continuously\n"
+            "Right trigger: set current X/Y/Z as origin\n"
+            "X button: exit calibration\n\n"
+            "Keep this window open while calibrating."
+        )
+        instructions.setWordWrap(True)
+
+        self.calibration_status_label = QLabel("Origin not set yet")
+        self.calibration_status_label.setAlignment(Qt.AlignCenter)
+        self.calibration_status_label.setStyleSheet(
+            "color: gray; font-weight: bold;"
+        )
+
+        start_btn = QPushButton("Start Manual Calibration")
+        exit_btn = QPushButton("Exit Calibration")
+
+        start_btn.clicked.connect(
+            lambda: self.controller.post_event(Event.ENTER_MANUAL_CALIBRATION)
+        )
+
+        exit_btn.clicked.connect(
+            lambda: self.controller.post_event(Event.EXIT_MANUAL_CALIBRATION)
+        )
+
+        layout.addWidget(instructions)
+        layout.addWidget(self.calibration_status_label)
+        layout.addWidget(start_btn)
+        layout.addWidget(exit_btn)
+
+        dlg.setLayout(layout)
+
+        self.calibration_dialog = dlg
+        dlg.show()
+
+    def _on_log_message(self, msg: str):
+        if msg == "ORIGIN_SET":
+            if self.calibration_status_label is not None:
+                self.calibration_status_label.setText("Origin selected successfully!")
+                self.calibration_status_label.setStyleSheet(
+                    "color: green; font-weight: bold;"
+                )
+            self.log_box.append("Origin selected successfully.")
+            return
+
+        self.log_box.append(msg)
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
