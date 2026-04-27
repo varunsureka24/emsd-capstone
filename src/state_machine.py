@@ -44,6 +44,7 @@ class State(Enum):
     Z_RAISING               = auto()
 
     MANUAL_WELD             = auto()
+    SET_TRAVEL_HEIGHT       = auto()
 
 
 # ---------------------------------------------------------------------------
@@ -81,10 +82,14 @@ class Event(Enum):
     ERROR_OCCURRED          = auto()
     ERROR_ACKNOWLEDGED      = auto()
 
-    # Manual Weld 
+    # Manual Weld
     ENTER_MANUAL_WELD       = auto()
     EXIT_MANUAL_WELD        = auto()
     MANUAL_WELD_TRIGGER     = auto()
+
+    # Travel height setup
+    ENTER_SET_TRAVEL_HEIGHT = auto()
+    EXIT_SET_TRAVEL_HEIGHT  = auto()
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +117,7 @@ TRANSITIONS: dict[tuple[State, Event], State] = {
 
     # ── Weld execution branch ────────────────────────────────────────
     (State.MOVE_TO_POSITION, Event.POSITION_REACHED):   State.FINE_POSITIONING,
+    (State.MOVE_TO_POSITION, Event.SEQUENCE_COMPLETE):   State.IDLE,
     (State.FINE_POSITIONING, Event.FINE_POS_DONE):       State.Z_LOWERING,
     (State.Z_LOWERING,       Event.Z_LOWER_DONE):        State.EXECUTE_WELD,
     (State.EXECUTE_WELD,     Event.WELD_COMPLETE):        State.Z_RAISING,
@@ -125,6 +131,11 @@ TRANSITIONS: dict[tuple[State, Event], State] = {
     # ── Manual weld ───────────────────────────────────────────────
     (State.IDLE, Event.ENTER_MANUAL_WELD): State.MANUAL_WELD,
     (State.MANUAL_WELD, Event.EXIT_MANUAL_WELD): State.IDLE,
+    (State.MANUAL_WELD, Event.MANUAL_WELD_TRIGGER): State.MOVE_TO_POSITION,
+
+    # ── Travel height setup ───────────────────────────────────────
+    (State.IDLE,              Event.ENTER_SET_TRAVEL_HEIGHT): State.SET_TRAVEL_HEIGHT,
+    (State.SET_TRAVEL_HEIGHT, Event.EXIT_SET_TRAVEL_HEIGHT):  State.IDLE,
 
 }
 

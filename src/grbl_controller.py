@@ -100,6 +100,34 @@ class GrblController:
         except Exception:
             return None
 
+    def get_status(self):
+        """Returns (state_str, (x, y, z)) from a single '?' query. Either value may be None."""
+        line = self.query_status_line()
+        if not line:
+            return None, None
+        state = None
+        pos = None
+        try:
+            state = line.split("|")[0].strip("<>")
+        except Exception:
+            pass
+        try:
+            if "MPos:" in line:
+                coords = line.split("MPos:")[1].split("|")[0].rstrip(">")
+                x, y, z = [float(v) for v in coords.split(",")]
+                if "WCO:" in line:
+                    wco = line.split("WCO:")[1].split("|")[0].rstrip(">")
+                    ox, oy, oz = [float(v) for v in wco.split(",")]
+                    self._last_wco = (ox, oy, oz)
+                ox, oy, oz = self._last_wco
+                pos = (x - ox, y - oy, z - oz)
+            elif "WPos:" in line:
+                wpos = line.split("WPos:")[1].split("|")[0].rstrip(">")
+                pos = tuple(float(v) for v in wpos.split(","))
+        except Exception:
+            pass
+        return state, pos
+
     def jog(self, dx=0.0, dy=0.0, dz=0.0, feed=500.0):
         cmd = "$J=G91 G21"
         if dx != 0.0:

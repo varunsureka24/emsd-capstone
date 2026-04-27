@@ -119,6 +119,7 @@ class WeldController(QObject):
         self._last_stick_pos_sync_time = 0.0
         self._prev_hat = (0, 0)
         self._prev_stick_active = False
+        self._prev_z_active = False
 
         self._latest_force = None
         self._contact_counter = 0
@@ -128,7 +129,11 @@ class WeldController(QObject):
         self._weld_start_time = None
         self._z_raise_started = False
         self._z_lower_started = False
+        self._z_fast_lower_complete = False
+        self._z_fast_lower_deadline = 0.0
         self._move_just_started = False
+        self._move_phase = "Z_RAISE"  # "Z_RAISE" | "XY_MOVE" | "DONE"
+        self._working_height: float = 5.0  # Z where force-sensor descent begins (set by user)
 
         self._force_history = deque(maxlen=5)
 
@@ -207,7 +212,7 @@ class WeldController(QObject):
             pass
 
     def set_travel_height(self, height_mm: float) -> None:
-        self._travel_height = max(5.0, min(80.0, height_mm))
+        self._travel_height = height_mm
         self.log_message.emit(f"Travel height set to {self._travel_height:.1f} mm")
 
     @property
@@ -243,6 +248,9 @@ class WeldController(QObject):
         self._weld_queue = list(self._waypoints.get_all())
         self._current_wp_index = 0
         self.log_message.emit(f"Weld queue loaded: {len(self._weld_queue)} waypoints.")
+        log.debug("[DBG] prepare_weld_queue: %d waypoints loaded", len(self._weld_queue))
+        for i, wp in enumerate(self._weld_queue):
+            log.debug("[DBG]   wp[%d]: x=%.2f y=%.2f", i, wp.x, wp.y)
         self.progress_updated.emit(0, len(self._weld_queue))
 
     def remove_waypoint(self, index: int) -> None:
@@ -363,27 +371,52 @@ class WeldController(QObject):
             self._grbl.soft_reset()
 
     def _on_enter_move_to_position(self) -> None:
+        log.debug("[DBG] _on_enter_move_to_position: index=%d queue_len=%d grbl=%s",
+                  self._current_wp_index, len(self._weld_queue), "connected" if self._grbl else "NONE")
         if self._current_wp_index >= len(self._weld_queue):
+            self.log_message.emit(
+                f"[DBG] Queue exhausted at index {self._current_wp_index}/{len(self._weld_queue)} — firing SEQUENCE_COMPLETE"
+            )
             self._sm.post_event(Event.SEQUENCE_COMPLETE)
             return
 
         wp = self._weld_queue[self._current_wp_index]
-
-        if self._grbl:
-            self._grbl.move_to(z=self._travel_height, feed=Z_FEED_RATE)
-            self._grbl.move_to(x=wp.x + X_OFFSET, y=wp.y, feed=XY_FEED_RATE)
-            self._move_just_started = True
-
         self.log_message.emit(
             f"Moving to waypoint {self._current_wp_index + 1}/{len(self._weld_queue)}: "
             f"Laser X={wp.x:.2f}, Y={wp.y:.2f} -> "
-            f"Toolhead X={wp.x + X_OFFSET:.2f}, Y={wp.y:.2f}" # possibly remove for UI simplicity
+            f"Toolhead X={wp.x + X_OFFSET:.2f}, Y={wp.y:.2f}"
         )
+
+        if not self._grbl:
+            self.log_message.emit("[DBG] WARNING: GRBL not connected — move command skipped, sequence will stall")
+            return
+
+        pos = self._grbl.get_position()
+        if pos is not None:
+            self._sim_x, self._sim_y, self._sim_z = pos
+
+        dz = self._travel_height - self._sim_z
+        if abs(dz) > 0.05:
+            self._move_phase = "Z_RAISE"
+            self._grbl.jog(dz=dz, feed=Z_FEED_RATE)
+            log.debug("[DBG] Jogging Z: dz=%.2f to travel_height=%.2f", dz, self._travel_height)
+        else:
+            self._move_phase = "XY_MOVE"
+            dx = (wp.x + X_OFFSET) - self._sim_x
+            dy = wp.y - self._sim_y
+            if abs(dx) > 0.05 or abs(dy) > 0.05:
+                self._grbl.jog(dx=dx, dy=dy, feed=XY_FEED_RATE)
+                log.debug("[DBG] Skipped Z (at height), jogging XY: dx=%.2f dy=%.2f", dx, dy)
+            else:
+                self._move_phase = "DONE"
+
+        self._move_just_started = True
 
     def _on_enter_z_lowering(self) -> None:
         self._contact_counter = 0
         self._last_z_step_time = 0.0
         self._z_lower_started = False
+        self._z_fast_lower_complete = False
 
         pos = self._grbl.get_position() if self._grbl else None
         if pos is not None:
@@ -392,7 +425,12 @@ class WeldController(QObject):
         else:
             self._z_start_lowering = self._sim_z
 
-        self.log_message.emit("Searching for contact with force sensor...")
+        self.log_message.emit(
+            f"Searching for contact with force sensor... "
+            f"[DBG] z_start={self._z_start_lowering:.2f} grbl={'connected' if self._grbl else 'NONE'} "
+            f"force_sensor={'connected' if self._force_sensor else 'NONE'} "
+            f"latest_force={self._latest_force}"
+        )
 
     def _on_enter_execute_weld(self) -> None:
         self._weld_start_time = time.time()
@@ -468,6 +506,8 @@ class WeldController(QObject):
             self._tick_error()
         elif state == State.MANUAL_WELD:
             self._tick_manual_weld()
+        elif state == State.SET_TRAVEL_HEIGHT:
+            self._tick_set_travel_height()
 
     def _tick_camera(self) -> None:
         if not self._camera:
@@ -509,10 +549,12 @@ class WeldController(QObject):
             data["left"], data["right"], data["up"], data["down"]
         )
 
+        self._jog_from_controller_data(data)
+
+    def _jog_from_controller_data(self, data: dict) -> None:
         now = time.time()
         hat = (data["hat_x"], data["hat_y"])
 
-        # Thumbstick takes priority over D-pad when active
         using_stick = data["stick_x"] != 0.0 or data["stick_y"] != 0.0
         if using_stick:
             if now - self._last_stick_jog_time < STICK_COMMAND_INTERVAL:
@@ -520,8 +562,6 @@ class WeldController(QObject):
             stick_mag = min((data["stick_x"] ** 2 + data["stick_y"] ** 2) ** 0.5, 1.0)
             feed = int(STICK_MIN_FEED + (STICK_MAX_FEED - STICK_MIN_FEED) * (stick_mag ** STICK_CURVE))
             step = (feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
-            # Normalize direction so step distance always fills the interval —
-            # prevents tiny steps at small deflections that execute fast and leave idle gaps
             dx = step * (data["stick_x"] / stick_mag)
             dy = step * (data["stick_y"] / stick_mag)
         else:
@@ -535,7 +575,6 @@ class WeldController(QObject):
             if self._grbl:
                 self._grbl.jog(dx=dx, dy=dy, feed=feed)
                 if using_stick:
-                    # Sync position from GRBL every 200 ms during stick jogging.
                     if now - self._last_stick_pos_sync_time >= 0.2:
                         pos = self._grbl.get_position()
                         if pos is not None:
@@ -571,20 +610,34 @@ class WeldController(QObject):
 
     def _tick_move_to_position(self) -> None:
         if not self._grbl:
+            log.debug("[DBG] _tick_move_to_position: GRBL not connected — stuck here")
             return
 
         if self._move_just_started:
             self._move_just_started = False
             return
 
-        pos = self._grbl.get_position()
+        state, pos = self._grbl.get_status()
         if pos is not None:
             self._sim_x, self._sim_y, self._sim_z = pos
             self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
-        state = self._grbl.get_machine_state()
-        if state == "Idle":
-            self._sm.post_event(Event.POSITION_REACHED)
+        log.debug("[DBG] _tick_move_to_position: phase=%s grbl_state=%r", self._move_phase, state)
+
+        if self._move_phase == "DONE" or state == "Idle":
+            if self._move_phase == "Z_RAISE":
+                wp = self._weld_queue[self._current_wp_index]
+                dx = (wp.x + X_OFFSET) - self._sim_x
+                dy = wp.y - self._sim_y
+                self._move_phase = "XY_MOVE"
+                self._move_just_started = True
+                if abs(dx) > 0.05 or abs(dy) > 0.05:
+                    self._grbl.jog(dx=dx, dy=dy, feed=XY_FEED_RATE)
+                    self.log_message.emit(
+                        f"Z raised to {self._sim_z:.2f} mm — jogging XY: dx={dx:.2f} dy={dy:.2f}"
+                    )
+            else:
+                self._sm.post_event(Event.POSITION_REACHED)
 
     def _tick_fine_positioning(self) -> None:
         self._sm.post_event(Event.FINE_POS_DONE)
@@ -598,22 +651,40 @@ class WeldController(QObject):
             self._sim_x, self._sim_y, self._sim_z = pos
             self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
-        if not self._force_sensor:
-            if not self._z_lower_started:
-                target_z = self._z_start_lowering - Z_MAX_DESCENT
-                self._grbl.move_to(z=target_z, feed=Z_FEED_RATE)
-                self._z_lower_started = True
-                return
-
-            state = self._grbl.get_machine_state()
-            if state == "Idle":
-                self.log_message.emit("Z lowered to max descent (no force sensor)")
-                self._sm.post_event(Event.Z_LOWER_DONE)
+        # Phase 1: fast jog down to working height
+        if not self._z_lower_started:
+            dz = self._working_height - self._sim_z
+            if dz < -0.05:
+                self._grbl.jog(dz=dz, feed=Z_FEED_RATE)
+                travel_secs = abs(dz) / (Z_FEED_RATE / 60.0)
+                self._z_fast_lower_deadline = time.monotonic() + travel_secs + 0.3
+                self.log_message.emit(
+                    f"Fast lowering to working height {self._working_height:.1f} mm "
+                    f"(~{travel_secs:.1f}s)..."
+                )
+            else:
+                self._z_fast_lower_deadline = time.monotonic()
+            self._z_lower_started = True
             return
 
+        # Wait for fast lower to finish (time-based — avoids relying on GRBL state query)
+        if not self._z_fast_lower_complete:
+            if time.monotonic() < self._z_fast_lower_deadline:
+                return
+            self._z_fast_lower_complete = True
+            self._z_start_lowering = self._sim_z
+            self.log_message.emit(
+                f"At working height {self._sim_z:.2f} mm — starting force-sensor descent"
+            )
+            if not self._force_sensor:
+                self.log_message.emit("No force sensor — firing Z_LOWER_DONE at working height")
+                self._sm.post_event(Event.Z_LOWER_DONE)
+                return
+
+        # Phase 2: slow step-jog with force sensor
         if self._latest_force is not None:
             if self._latest_force >= HARD_CONTACT_THRESHOLD:
-                self.log_message.emit("Hard contact threshold reached")
+                self.log_message.emit(f"Hard contact threshold reached (force={self._latest_force:.3f} kg)")
                 self._grbl.feed_hold()
                 self._sm.post_event(Event.ERROR_OCCURRED)
                 return
@@ -624,14 +695,15 @@ class WeldController(QObject):
                 self._contact_counter = 0
 
             if self._contact_counter >= FORCE_DEBOUNCE_COUNT:
-                self.log_message.emit("Contact confirmed — weld about to fire")
+                self.log_message.emit(f"Contact confirmed — weld about to fire (force={self._latest_force:.3f} kg)")
                 self._grbl.jog_cancel()
                 self._sm.post_event(Event.Z_LOWER_DONE)
                 return
 
         if self._z_start_lowering is not None:
-            if abs(self._sim_z - self._z_start_lowering) >= Z_MAX_DESCENT:
-                self.log_message.emit("No contact detected before Z limit")
+            descent = abs(self._sim_z - self._z_start_lowering)
+            if descent >= Z_MAX_DESCENT:
+                self.log_message.emit(f"No contact detected before Z limit (descended {descent:.2f} mm)")
                 self._grbl.feed_hold()
                 self._sm.post_event(Event.ERROR_OCCURRED)
                 return
@@ -654,16 +726,22 @@ class WeldController(QObject):
             return
 
         if not self._z_raise_started:
-            self._grbl.move_to(z=self._travel_height, feed=Z_FEED_RATE)
+            pos = self._grbl.get_position()
+            if pos is not None:
+                self._sim_x, self._sim_y, self._sim_z = pos
+            dz = self._travel_height - self._sim_z
+            if abs(dz) > 0.05:
+                self._grbl.jog(dz=dz, feed=Z_FEED_RATE)
+                log.debug("[DBG] _tick_z_raising: jogging Z dz=%.2f to travel_height=%.2f", dz, self._travel_height)
             self._z_raise_started = True
             return
 
-        pos = self._grbl.get_position()
+        state, pos = self._grbl.get_status()
         if pos is not None:
             self._sim_x, self._sim_y, self._sim_z = pos
             self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
-        state = self._grbl.get_machine_state()
+        log.debug("[DBG] _tick_z_raising: grbl_state=%r z=%.2f travel_height=%.2f", state, self._sim_z, self._travel_height)
         if state == "Idle":
             self._current_wp_index += 1
 
@@ -700,3 +778,57 @@ class WeldController(QObject):
             return
 
         self._jog_from_controller_data(data)
+
+    def _tick_set_travel_height(self) -> None:
+        if not self._controller_input:
+            return
+
+        data = self._controller_input.poll()
+
+        if data["btn_x"]:
+            self._sm.post_event(Event.EXIT_SET_TRAVEL_HEIGHT)
+            return
+
+        if data["btn_rt"]:
+            pos = self._grbl.get_position() if self._grbl else None
+            if pos is not None:
+                self._sim_x, self._sim_y, self._sim_z = pos
+                self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+            self._working_height = self._sim_z
+            self.set_travel_height(self._sim_z + 20.0)
+            if self._grbl:
+                self._grbl.jog(dz=20.0, feed=Z_FEED_RATE)
+            self.log_message.emit(
+                f"Working height set to {self._working_height:.1f} mm — "
+                f"raising to travel height {self._travel_height:.1f} mm"
+            )
+            self._sm.post_event(Event.EXIT_SET_TRAVEL_HEIGHT)
+            return
+
+        now = time.time()
+        using_z = data["up"] or data["down"]
+
+        if not using_z:
+            if self._grbl and self._prev_z_active:
+                self._grbl.jog_cancel()
+            self._prev_z_active = False
+            return
+
+        if now - self._last_stick_jog_time < STICK_COMMAND_INTERVAL:
+            return
+
+        z_feed = Z_FEED_RATE
+        z_step = (z_feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
+        dz = z_step if data["up"] else -z_step
+
+        if self._grbl:
+            self._grbl.jog(dz=dz, feed=z_feed)
+            if now - self._last_stick_pos_sync_time >= 0.2:
+                pos = self._grbl.get_position()
+                if pos is not None:
+                    self._sim_x, self._sim_y, self._sim_z = pos
+                    self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+                self._last_stick_pos_sync_time = now
+
+        self._prev_z_active = True
+        self._last_stick_jog_time = now
