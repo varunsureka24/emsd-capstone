@@ -19,11 +19,7 @@ except Exception:
     LED = None
 
 
-<<<<<<< HEAD
 DEFAULT_SERIAL_PORT = "COM3"
-=======
-DEFAULT_SERIAL_PORT = "/dev/ttyACM1"
->>>>>>> 727b5837a36abe40525d937f6f90009c6c8cdf2c
 DEFAULT_BAUD = 115200
 
 FORCE_SENSOR_PORT = "COM5"
