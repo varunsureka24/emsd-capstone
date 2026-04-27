@@ -19,7 +19,7 @@ except Exception:
     LED = None
 
 
-DEFAULT_SERIAL_PORT = "/dev/ttyACM0"
+DEFAULT_SERIAL_PORT = "/dev/ttyACM1"
 DEFAULT_BAUD = 115200
 
 FORCE_SENSOR_PORT = "/dev/ttyUSB0"   # verify with: ls /dev/ttyUSB*
@@ -76,7 +76,7 @@ class WeldController(QObject):
     laser_state_changed = pyqtSignal(bool)
     force_updated = pyqtSignal(float)
 
-    def __init__(self, serial_port: str = "COM3", baud: int = DEFAULT_BAUD,
+    def __init__(self, serial_port: str = DEFAULT_SERIAL_PORT, baud: int = DEFAULT_BAUD,
                  enable_grbl: bool = True, enable_homing: bool = True,
                  enable_force_sensor: bool = True,
                  enable_controller: bool = True, enable_camera: bool = True,
