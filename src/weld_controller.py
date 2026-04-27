@@ -131,6 +131,8 @@ class WeldController(QObject):
         self._z_lower_started = False
         self._z_fast_lower_complete = False
         self._z_fast_lower_deadline = 0.0
+        self._z_steps_taken = 0
+        self._last_contact_time = 0.0
         self._move_just_started = False
         self._move_phase = "Z_RAISE"  # "Z_RAISE" | "XY_MOVE" | "DONE"
         self._working_height: float = 5.0  # Z where force-sensor descent begins (set by user)
@@ -413,10 +415,13 @@ class WeldController(QObject):
         self._move_just_started = True
 
     def _on_enter_z_lowering(self) -> None:
+        self._grbl.jog(dx=-5, dy=0.0, feed=XY_FEED_RATE)
         self._contact_counter = 0
+        self._last_contact_time = 0.0
         self._last_z_step_time = 0.0
         self._z_lower_started = False
         self._z_fast_lower_complete = False
+        self._z_steps_taken = 0
 
         pos = self._grbl.get_position() if self._grbl else None
         if pos is not None:
@@ -466,6 +471,7 @@ class WeldController(QObject):
             self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
 
         laser_wp = Waypoint(x=self._sim_x, y=self._sim_y)
+        
 
         self._manual_weld_active = True
         self._weld_queue = [laser_wp]
@@ -646,13 +652,12 @@ class WeldController(QObject):
         if not self._grbl:
             return
 
-        pos = self._grbl.get_position()
-        if pos is not None:
-            self._sim_x, self._sim_y, self._sim_z = pos
-            self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
-
-        # Phase 1: fast jog down to working height
+        # Phase 1: fast jog down to working height (get_position only once here)
         if not self._z_lower_started:
+            pos = self._grbl.get_position()
+            if pos is not None:
+                self._sim_x, self._sim_y, self._sim_z = pos
+                self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
             dz = self._working_height - self._sim_z
             if dz < -0.05:
                 self._grbl.jog(dz=dz, feed=Z_FEED_RATE)
@@ -667,51 +672,61 @@ class WeldController(QObject):
             self._z_lower_started = True
             return
 
-        # Wait for fast lower to finish (time-based — avoids relying on GRBL state query)
+        # Wait for fast lower to finish (time-based)
         if not self._z_fast_lower_complete:
             if time.monotonic() < self._z_fast_lower_deadline:
                 return
             self._z_fast_lower_complete = True
-            self._z_start_lowering = self._sim_z
-            self.log_message.emit(
-                f"At working height {self._sim_z:.2f} mm — starting force-sensor descent"
-            )
+            self.log_message.emit("At working height — starting force-sensor descent")
             if not self._force_sensor:
                 self.log_message.emit("No force sensor — firing Z_LOWER_DONE at working height")
                 self._sm.post_event(Event.Z_LOWER_DONE)
                 return
 
         # Phase 2: slow step-jog with force sensor
-        if self._latest_force is not None:
-            if self._latest_force >= HARD_CONTACT_THRESHOLD:
-                self.log_message.emit(f"Hard contact threshold reached (force={self._latest_force:.3f} kg)")
+        # Mirrors test_weld.py: abs(force), 1-second gap between contact readings,
+        # step counter for Z limit (no blocking get_position() calls)
+        now = time.time()
+        force = self._latest_force
+
+        if force is not None:
+            if abs(force) >= HARD_CONTACT_THRESHOLD:
+                self.log_message.emit(f"Hard contact threshold reached (force={force:.3f} kg)")
                 self._grbl.feed_hold()
                 self._sm.post_event(Event.ERROR_OCCURRED)
                 return
 
-            if self._latest_force >= CONTACT_THRESHOLD:
-                self._contact_counter += 1
+            if abs(force) >= CONTACT_THRESHOLD:
+                # Only increment once per second — matches test_weld.py's time.sleep(1.0)
+                if now - self._last_contact_time >= 1.0:
+                    self._contact_counter += 1
+                    self._last_contact_time = now
+                    log.debug("[DBG] Contact reading %d/%d (force=%.3f kg)",
+                              self._contact_counter, FORCE_DEBOUNCE_COUNT, force)
             else:
                 self._contact_counter = 0
+                self._last_contact_time = 0.0
 
             if self._contact_counter >= FORCE_DEBOUNCE_COUNT:
-                self.log_message.emit(f"Contact confirmed — weld about to fire (force={self._latest_force:.3f} kg)")
+                self.log_message.emit(f"Contact confirmed — weld about to fire (force={force:.3f} kg)")
                 self._grbl.jog_cancel()
                 self._sm.post_event(Event.Z_LOWER_DONE)
                 return
 
-        if self._z_start_lowering is not None:
-            descent = abs(self._sim_z - self._z_start_lowering)
-            if descent >= Z_MAX_DESCENT:
-                self.log_message.emit(f"No contact detected before Z limit (descended {descent:.2f} mm)")
-                self._grbl.feed_hold()
-                self._sm.post_event(Event.ERROR_OCCURRED)
-                return
+        # Z limit via step count — avoids blocking position query
+        descent = self._z_steps_taken * Z_TOUCH_STEP
+        log.debug("[DBG] Z lowering step %d  descent=%.2f mm  force=%s",
+                  self._z_steps_taken, descent, f"{force:.3f}" if force is not None else "None")
+        if descent >= Z_MAX_DESCENT:
+            self.log_message.emit(f"No contact before Z limit ({descent:.2f} mm descended)")
+            self._grbl.feed_hold()
+            self._sm.post_event(Event.ERROR_OCCURRED)
+            return
 
-        now = time.time()
         if now - self._last_z_step_time >= Z_STEP_INTERVAL:
             self._grbl.jog(dz=-Z_TOUCH_STEP, feed=Z_TOUCH_FEED)
             self._last_z_step_time = now
+            self._z_steps_taken += 1
 
     def _tick_execute_weld(self) -> None:
         if self._weld_start_time is None:
@@ -795,7 +810,7 @@ class WeldController(QObject):
                 self._sim_x, self._sim_y, self._sim_z = pos
                 self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
             self._working_height = self._sim_z
-            self.set_travel_height(self._sim_z + 20.0)
+            self.set_travel_height(self._sim_z + 30.0)
             if self._grbl:
                 self._grbl.jog(dz=20.0, feed=Z_FEED_RATE)
             self.log_message.emit(
