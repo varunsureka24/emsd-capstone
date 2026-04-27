@@ -36,7 +36,7 @@ WELD_RELAY_GPIO_PIN = 23
 # GRBL INFO
 Z_TRAVEL_HEIGHT_DEFAULT = 25.0   # mm — fallback if user cancels the startup prompt
 XY_FEED_RATE = 3000
-Z_FEED_RATE = 1000
+Z_FEED_RATE = 2000
 
 JOG_FEED = 2000
 COMMAND_INTERVAL = 0.2
@@ -52,12 +52,12 @@ STICK_CURVE = 2.0               # response curve exponent: 1=linear, 2=quadratic
 # With probe in air the reading will vary ~0.0–0.6 kg due to HX711 noise.
 # Tune CONTACT_THRESHOLD after physical testing; it must sit comfortably
 # above the at-rest noise floor.
-CONTACT_THRESHOLD = 1.25       # kg — light contact detected, stop Z
+CONTACT_THRESHOLD = 2.0       # kg — light contact detected, stop Z
 HARD_CONTACT_THRESHOLD = 8.0   # kg — dangerous overload, emergency stop
 FORCE_DEBOUNCE_COUNT = 2       # consecutive readings required before acting
 Z_TOUCH_STEP = 0.2
 Z_TOUCH_FEED = 1000
-Z_MAX_DESCENT = 20.0
+Z_MAX_DESCENT = 30.0
 Z_STEP_INTERVAL = 0.12
 
 WELD_DWELL_TIME = 0.100  # seconds — ensures relay fires for full 100 ms before Z raises
@@ -379,7 +379,7 @@ class WeldController(QObject):
             self.log_message.emit(
                 f"[DBG] Queue exhausted at index {self._current_wp_index}/{len(self._weld_queue)} — firing SEQUENCE_COMPLETE"
             )
-            self._sm.post_event(Event.SEQUENCE_COMPLETE)
+            self._sm.post_event(Event.IDLE)
             return
 
         wp = self._weld_queue[self._current_wp_index]
@@ -404,7 +404,7 @@ class WeldController(QObject):
             log.debug("[DBG] Jogging Z: dz=%.2f to travel_height=%.2f", dz, self._travel_height)
         else:
             self._move_phase = "XY_MOVE"
-            dx = (wp.x + X_OFFSET) - self._sim_x
+            dx = wp.x - self._sim_x
             dy = wp.y - self._sim_y
             if abs(dx) > 0.05 or abs(dy) > 0.05:
                 self._grbl.jog(dx=dx, dy=dy, feed=XY_FEED_RATE)
@@ -415,6 +415,7 @@ class WeldController(QObject):
         self._move_just_started = True
 
     def _on_enter_z_lowering(self) -> None:
+        time.sleep(1)
         self._grbl.jog(dx=-5, dy=0.0, feed=XY_FEED_RATE)
         self._contact_counter = 0
         self._last_contact_time = 0.0
@@ -633,7 +634,7 @@ class WeldController(QObject):
         if self._move_phase == "DONE" or state == "Idle":
             if self._move_phase == "Z_RAISE":
                 wp = self._weld_queue[self._current_wp_index]
-                dx = (wp.x + X_OFFSET) - self._sim_x
+                dx = wp.x - self._sim_x
                 dy = wp.y - self._sim_y
                 self._move_phase = "XY_MOVE"
                 self._move_just_started = True
@@ -720,7 +721,7 @@ class WeldController(QObject):
         if descent >= Z_MAX_DESCENT:
             self.log_message.emit(f"No contact before Z limit ({descent:.2f} mm descended)")
             self._grbl.feed_hold()
-            self._sm.post_event(Event.ERROR_OCCURRED)
+            self._sm.post_event(Event.IDLE)
             return
 
         if now - self._last_z_step_time >= Z_STEP_INTERVAL:
@@ -780,19 +781,6 @@ class WeldController(QObject):
         self._set_weld_relay(False)
         self._set_laser(False)
     
-    # def _tick_manual_weld(self) -> None:
-    #     if not self._controller_input:
-    #         return
-
-    #     data = self._controller_input.poll()
-
-    #     # A and X do nothing in manual weld mode.
-    #     # Right trigger captures current laser pose and starts one weld cycle.
-    #     if data["btn_rt"]:
-    #         self._start_manual_weld_from_current_pose()
-    #         return
-
-        # self._jog_from_controller_data(data)
     
     def _tick_manual_weld(self) -> None:
         if not self._controller_input:
@@ -800,66 +788,13 @@ class WeldController(QObject):
 
         data = self._controller_input.poll()
 
-        # X button exits manual weld mode
-        if data["btn_x"]:
-            self._sm.post_event(Event.EXIT_MANUAL_WELD)
-            return
-
-        # Right trigger starts the manual weld sequence
+        # A and X do nothing in manual weld mode.
+        # Right trigger captures current laser pose and starts one weld cycle.
         if data["btn_rt"]:
             self._start_manual_weld_from_current_pose()
             return
 
-        # Left thumbstick controls X/Y
-        # D-pad up/down controls Z
-        self._jog_manual_weld_from_controller(data)
-    
-    def _jog_manual_weld_from_controller(self, data: dict) -> None:
-        now = time.time()
-
-        dx = 0.0
-        dy = 0.0
-        dz = 0.0
-
-        # left thumbstick = X/Y
-        using_stick = data["stick_x"] != 0.0 or data["stick_y"] != 0.0
-
-        if using_stick:
-            if now - self._last_stick_jog_time < STICK_COMMAND_INTERVAL:
-                return
-
-            stick_mag = min((data["stick_x"] ** 2 + data["stick_y"] ** 2) ** 0.5, 1.0)
-
-            feed = int(
-                STICK_MIN_FEED
-                + (STICK_MAX_FEED - STICK_MIN_FEED) * (stick_mag ** STICK_CURVE)
-            )
-
-            step = (feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
-
-            dx = step * (data["stick_x"] / stick_mag)
-            dy = step * (data["stick_y"] / stick_mag)
-
-            self._last_stick_jog_time = now
-
-        # d-pad up/down = Z
-        if data["hat_y"] != 0:
-            if now - self._last_jog_time < COMMAND_INTERVAL:
-                return
-
-            dz = 0.5 * data["hat_y"]   # up = Z+, down = Z-
-            feed = Z_FEED_RATE
-
-            self._last_jog_time = now
-
-        if dx != 0.0 or dy != 0.0 or dz != 0.0:
-            if self._grbl:
-                self._grbl.jog(dx=dx, dy=dy, dz=dz, feed=feed)
-
-                pos = self._grbl.get_position()
-                if pos is not None:
-                    self._sim_x, self._sim_y, self._sim_z = pos
-                    self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
+        self._jog_from_controller_data(data)
 
     def _tick_set_travel_height(self) -> None:
         if not self._controller_input:
@@ -888,23 +823,35 @@ class WeldController(QObject):
             return
 
         now = time.time()
+        using_stick = data["stick_x"] != 0.0 or data["stick_y"] != 0.0
         using_z = data["up"] or data["down"]
 
-        if not using_z:
-            if self._grbl and self._prev_z_active:
+        if not using_stick and not using_z:
+            if self._grbl and (self._prev_z_active or self._prev_stick_active):
                 self._grbl.jog_cancel()
             self._prev_z_active = False
+            self._prev_stick_active = False
             return
 
         if now - self._last_stick_jog_time < STICK_COMMAND_INTERVAL:
             return
 
-        z_feed = Z_FEED_RATE
-        z_step = (z_feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
-        dz = z_step if data["up"] else -z_step
+        dx = dy = dz = 0.0
+        feed = Z_FEED_RATE
+
+        if using_stick:
+            stick_mag = min((data["stick_x"] ** 2 + data["stick_y"] ** 2) ** 0.5, 1.0)
+            feed = int(STICK_MIN_FEED + (STICK_MAX_FEED - STICK_MIN_FEED) * (stick_mag ** STICK_CURVE))
+            step = (feed / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
+            dx = step * (data["stick_x"] / stick_mag)
+            dy = step * (data["stick_y"] / stick_mag)
+
+        if using_z:
+            z_step = (Z_FEED_RATE / 60.0) * STICK_COMMAND_INTERVAL * STICK_OVERLAP
+            dz = z_step if data["up"] else -z_step
 
         if self._grbl:
-            self._grbl.jog(dz=dz, feed=z_feed)
+            self._grbl.jog(dx=dx, dy=dy, dz=dz, feed=feed)
             if now - self._last_stick_pos_sync_time >= 0.2:
                 pos = self._grbl.get_position()
                 if pos is not None:
@@ -912,5 +859,6 @@ class WeldController(QObject):
                     self.position_updated.emit(self._sim_x, self._sim_y, self._sim_z)
                 self._last_stick_pos_sync_time = now
 
-        self._prev_z_active = True
+        self._prev_z_active = using_z
+        self._prev_stick_active = using_stick
         self._last_stick_jog_time = now
